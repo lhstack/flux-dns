@@ -1,0 +1,32 @@
+//! Web module
+//!
+//! Contains the Axum web server and REST API implementations.
+
+pub mod auth;
+pub mod cache;
+pub mod dns_query;
+pub mod listeners;
+pub mod logs;
+pub mod records;
+pub mod rewrite;
+pub mod static_files;
+pub mod status;
+pub mod strategy;
+pub mod upstreams;
+
+pub use auth::{
+    auth_middleware, ApiError, AuthService, AuthState, Claims, LoginRequest, LoginResponse,
+};
+pub use cache::{cache_router, CacheState};
+pub use dns_query::{dns_query_router, DnsQueryState};
+pub use listeners::{listeners_router, ListenersState};
+pub use logs::{logs_router, LogsState};
+pub use records::{
+    create_record, delete_record, get_record, list_records, records_router, update_record,
+    CreateRecordRequest, RecordResponse, RecordsListResponse, RecordsState, UpdateRecordRequest,
+};
+pub use rewrite::{rewrite_router, RewriteState};
+pub use static_files::{fallback_handler, index_handler, static_handler, Assets};
+pub use status::{status_router, StatusState};
+pub use strategy::{strategy_router, StrategyState};
+pub use upstreams::{upstreams_router, UpstreamsState};
