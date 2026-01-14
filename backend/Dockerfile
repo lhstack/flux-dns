@@ -1,5 +1,5 @@
 # 后端构建 Dockerfile - 支持 amd64 和 arm64
-FROM rust:1.83-alpine AS builder
+FROM rust:1.92-alpine AS builder
 
 # 设置时区和语言
 ENV TZ=Asia/Shanghai \
