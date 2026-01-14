@@ -56,25 +56,90 @@
 
 ## 快速开始
 
-### 环境要求
+### Docker 部署 (推荐)
+
+支持架构: `linux/amd64`, `linux/arm64`
+
+#### Docker Compose
+
+```yaml
+version: '3.8'
+
+services:
+  fluxdns:
+    image: lhstack/fluxdns:latest
+    container_name: fluxdns
+    restart: unless-stopped
+    user: "1000:1000"
+    environment:
+      - TZ=Asia/Shanghai
+      - DATABASE_URL=sqlite:/app/data/fluxdns.db?mode=rwc
+      - WEB_PORT=8080
+      - ADMIN_USERNAME=admin
+      - ADMIN_PASSWORD=admin
+      - LOG_PATH=/app/logs
+      - LOG_LEVEL=info
+    ports:
+      - "8080:8080"
+      - "53:53/udp"
+      - "53:53/tcp"
+      - "853:853"
+      - "443:443"
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    cap_add:
+      - NET_BIND_SERVICE
+```
+
+```bash
+docker-compose up -d
+```
+
+#### Docker Run
+
+```bash
+docker run -d \
+  --name fluxdns \
+  --restart unless-stopped \
+  --user 1000:1000 \
+  -e TZ=Asia/Shanghai \
+  -e ADMIN_USERNAME=admin \
+  -e ADMIN_PASSWORD=admin \
+  -p 8080:8080 \
+  -p 53:53/udp \
+  -p 53:53/tcp \
+  -p 853:853 \
+  -p 443:443 \
+  -v ./data:/app/data \
+  -v ./logs:/app/logs \
+  --cap-add NET_BIND_SERVICE \
+  lhstack/fluxdns:latest
+```
+
+服务启动后访问 `http://localhost:8080` 进入管理界面。
+
+### 源码构建
+
+#### 环境要求
 - Rust 1.70+
 - Node.js 18+
 - pnpm
 
-### 构建后端
+#### 构建后端
 ```bash
 cd backend
 cargo build --release
 ```
 
-### 构建前端
+#### 构建前端
 ```bash
 cd frontend
 pnpm install
 pnpm build
 ```
 
-### 运行服务
+#### 运行服务
 ```bash
 cd backend
 cargo run --release

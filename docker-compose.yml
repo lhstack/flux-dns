@@ -1,0 +1,29 @@
+version: '3.8'
+
+services:
+  fluxdns:
+    image: lhstack/fluxdns:latest
+    container_name: fluxdns
+    restart: unless-stopped
+    user: "1000:1000"
+    environment:
+      - TZ=Asia/Shanghai
+      - DATABASE_URL=sqlite:/app/data/fluxdns.db?mode=rwc
+      - WEB_PORT=8080
+      - ADMIN_USERNAME=admin
+      - ADMIN_PASSWORD=admin
+      - LOG_PATH=/app/logs
+      - LOG_LEVEL=info
+    ports:
+      - "8080:8080"      # Web 管理界面
+      - "53:53/udp"      # DNS UDP
+      - "53:53/tcp"      # DNS TCP
+      - "853:853"        # DoT/DoQ
+      - "443:443"        # DoH/DoH3
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      # 如需 TLS，挂载证书
+      # - ./certs:/app/certs:ro
+    cap_add:
+      - NET_BIND_SERVICE
