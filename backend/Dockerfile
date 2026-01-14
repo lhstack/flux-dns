@@ -6,27 +6,21 @@ ENV TZ=Asia/Shanghai \
     LANG=C.UTF-8 \
     LC_ALL=C.UTF-8
 
-RUN apk add --no-cache tzdata musl-dev pkgconfig openssl-dev openssl-libs-static && \
+RUN apk add --no-cache tzdata musl-dev pkgconfig openssl-dev openssl-libs-static git && \
     cp /usr/share/zoneinfo/$TZ /etc/localtime && \
     echo $TZ > /etc/timezone
 
 WORKDIR /app
 
-# 复制依赖文件先构建依赖缓存
+# 复制所有源码和依赖文件
 COPY Cargo.toml Cargo.lock ./
-RUN mkdir src && echo "fn main() {}" > src/main.rs && \
-    cargo build --release && \
-    rm -rf src
-
-# 复制源码
 COPY src ./src
 
 # 复制前端构建产物
 COPY dist ./dist
 
-# 删除缓存的空 main.rs 编译产物，重新构建
-RUN rm -rf target/release/.fingerprint/fluxdns-* target/release/deps/fluxdns-* target/release/dns-proxy-service && \
-    cargo build --release
+# 构建
+RUN cargo build --release
 
 # 运行阶段
 FROM alpine:3.20
