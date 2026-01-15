@@ -1,9 +1,18 @@
 # FluxDNS
 
 一个功能完整的 DNS 代理服务，支持多种协议和 Web 管理界面。
-
+## 演示图
+![1](./images/1.png)
+![2](./images/2.png)
+![3](./images/3.png)
+![4](./images/4.png)
+![5](./images/5.png)
+![6](./images/6.png)
+![7](./images/7.png)
+![8](./images/8.png)
+![9](./images/9.png)
+![10](./images/10.png)
 ## 功能特性
-
 ### DNS 协议支持
 - **UDP DNS** - 标准 DNS 查询 (端口 53)
 - **DoH** - DNS over HTTPS (端口 443)
