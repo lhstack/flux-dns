@@ -150,6 +150,12 @@ pub struct UpstreamStats {
     pub last_failure: Option<Instant>,
     /// Whether the server is currently healthy
     pub healthy: bool,
+    /// Suspension end time - server won't be used until this time
+    #[serde(skip)]
+    pub suspended_until: Option<Instant>,
+    /// Current suspension duration in seconds (for exponential backoff)
+    #[serde(skip)]
+    pub suspension_duration_secs: u64,
 }
 
 impl Default for UpstreamStats {
@@ -164,6 +170,8 @@ impl Default for UpstreamStats {
             last_success: None,
             last_failure: None,
             healthy: true,
+            suspended_until: None,
+            suspension_duration_secs: 0,
         }
     }
 }
@@ -217,6 +225,14 @@ impl UpstreamStats {
         self.last_response_time_ms = Some(response_time_ms);
         self.last_success = Some(Instant::now());
         self.healthy = true;
+        
+        // Clear suspension on success - server is working again
+        if self.suspended_until.is_some() {
+            tracing::info!("Server recovered from suspension after successful query");
+            self.suspended_until = None;
+            // Reduce suspension duration for next time (but keep some memory)
+            self.suspension_duration_secs = (self.suspension_duration_secs / 2).max(0);
+        }
 
         // Update sliding window
         if self.recent_response_times.len() >= Self::MAX_RECENT_SAMPLES {
@@ -236,26 +252,92 @@ impl UpstreamStats {
         }
     }
 
-    /// Record a failed query
+    /// Record a failed query with exponential backoff suspension
     pub fn record_failure(&mut self) {
         self.queries += 1;
         self.failures += 1;
         self.last_failure = Some(Instant::now());
         
-        // Mark as unhealthy if failure rate is too high
+        // Mark as unhealthy if failure rate is too high (< 50% success rate after 5+ queries)
         if self.success_rate() < 0.5 && self.queries >= 5 {
             self.healthy = false;
+            
+            // Calculate suspension duration based on success rate
+            // Lower success rate = longer suspension
+            let base_duration = 30u64; // Base: 30 seconds
+            let max_duration = 300u64; // Max: 5 minutes
+            
+            // Exponential backoff: double the previous duration, capped at max
+            if self.suspension_duration_secs == 0 {
+                self.suspension_duration_secs = base_duration;
+            } else {
+                self.suspension_duration_secs = (self.suspension_duration_secs * 2).min(max_duration);
+            }
+            
+            // Adjust based on success rate: worse rate = longer suspension
+            let rate_multiplier = if self.success_rate() < 0.2 {
+                2.0 // Very bad: double the suspension
+            } else if self.success_rate() < 0.3 {
+                1.5
+            } else {
+                1.0
+            };
+            
+            let final_duration = ((self.suspension_duration_secs as f64) * rate_multiplier) as u64;
+            let final_duration = final_duration.min(max_duration);
+            
+            self.suspended_until = Some(Instant::now() + Duration::from_secs(final_duration));
+            
+            tracing::warn!(
+                "Server suspended for {}s (success rate: {:.1}%)", 
+                final_duration, 
+                self.success_rate() * 100.0
+            );
         }
     }
 
-    /// Check if server should be considered healthy
+    /// Check if server is currently suspended
+    pub fn is_suspended(&self) -> bool {
+        if let Some(until) = self.suspended_until {
+            if Instant::now() < until {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Get remaining suspension time in seconds
+    pub fn suspension_remaining_secs(&self) -> Option<u64> {
+        if let Some(until) = self.suspended_until {
+            let now = Instant::now();
+            if now < until {
+                return Some((until - now).as_secs());
+            }
+        }
+        None
+    }
+
+    /// Check if server should be considered healthy and available
     pub fn is_healthy(&self) -> bool {
+        // If suspended, check if suspension period has ended
+        if self.is_suspended() {
+            return false;
+        }
+        
+        // If suspension just ended, give it another chance
+        if self.suspended_until.is_some() && !self.is_suspended() {
+            return true;
+        }
+        
         self.healthy
     }
 
     /// Reset health status (for manual recovery)
     pub fn reset_health(&mut self) {
         self.healthy = true;
+        self.failures = 0;
+        self.suspended_until = None;
+        self.suspension_duration_secs = 0;
     }
 
     /// Get recent response times for debugging
@@ -371,7 +453,7 @@ impl UpstreamManager {
         self.servers.read().await.clone()
     }
 
-    /// Get healthy servers only
+    /// Get healthy servers only (excludes suspended servers)
     pub async fn get_healthy_servers(&self) -> Vec<UpstreamServer> {
         let servers = self.servers.read().await;
         let stats = self.stats.read().await;
