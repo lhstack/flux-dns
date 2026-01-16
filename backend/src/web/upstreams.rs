@@ -114,8 +114,12 @@ pub struct ServerStatus {
     pub enabled: bool,
     pub healthy: bool,
     pub queries: u64,
+    pub successes: u64,
     pub failures: u64,
+    pub success_rate: f64,
     pub avg_response_time_ms: u64,
+    pub suspended: bool,
+    pub suspension_remaining_secs: Option<u64>,
 }
 
 /// API response for server status
@@ -508,8 +512,12 @@ pub async fn get_status(
                 enabled: s.enabled,
                 healthy: server_stats.map(|st| st.is_healthy()).unwrap_or(s.enabled),
                 queries: server_stats.map(|st| st.queries).unwrap_or(0),
+                successes: server_stats.map(|st| st.successes).unwrap_or(0),
                 failures: server_stats.map(|st| st.failures).unwrap_or(0),
+                success_rate: server_stats.map(|st| st.success_rate()).unwrap_or(1.0),
                 avg_response_time_ms: server_stats.map(|st| st.avg_response_time_ms()).unwrap_or(0),
+                suspended: server_stats.map(|st| st.is_suspended()).unwrap_or(false),
+                suspension_remaining_secs: server_stats.and_then(|st| st.suspension_remaining_secs()),
             }
         })
         .collect();
@@ -517,14 +525,51 @@ pub async fn get_status(
     Ok(Json(ServerStatusResponse { data: status }))
 }
 
+/// Reset upstream server health status
+///
+/// POST /api/upstreams/:id/reset-health
+pub async fn reset_health(
+    State(state): State<UpstreamsState>,
+    Path(id): Path<i64>,
+) -> Result<impl IntoResponse, ApiError> {
+    // Check if server exists
+    let repo = state.db.upstream_servers();
+    let server = repo.get_by_id(id).await.map_err(|e| ApiError {
+        code: "INTERNAL_ERROR".to_string(),
+        message: format!("Failed to get upstream server: {}", e),
+        details: None,
+    })?;
+
+    if server.is_none() {
+        return Err(ApiError {
+            code: "NOT_FOUND".to_string(),
+            message: format!("Upstream server with id {} not found", id),
+            details: None,
+        });
+    }
+
+    // Reset health status
+    state.upstream_manager.reset_health(id).await;
+
+    tracing::info!("Manually reset health status for upstream server {}", id);
+
+    Ok(Json(serde_json::json!({
+        "message": "Health status reset successfully",
+        "server_id": id
+    })))
+}
+
 /// Build the upstream servers API router
 pub fn upstreams_router(state: UpstreamsState) -> axum::Router {
-    use axum::routing::get;
+    use axum::routing::{get, post};
 
+    // Note: More specific routes must come before parameterized routes
+    // /status must be before /:id to avoid being matched as an id
     axum::Router::new()
-        .route("/", get(list_upstreams).post(create_upstream))
         .route("/status", get(get_status))
+        .route("/", get(list_upstreams).post(create_upstream))
         .route("/:id", get(get_upstream).put(update_upstream).delete(delete_upstream))
+        .route("/:id/reset-health", post(reset_health))
         .with_state(state)
 }
 

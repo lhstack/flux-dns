@@ -60,7 +60,7 @@
       </el-col>
     </el-row>
 
-    <el-row :gutter="20">
+    <el-row :gutter="20" class="config-row">
       <!-- 缓存配置 -->
       <el-col :xs="24" :md="12">
         <el-card class="config-card" shadow="never">
@@ -446,6 +446,16 @@ onMounted(() => {
   margin-top: 4px;
 }
 
+/* 配置行 - 等高卡片 */
+.config-row {
+  display: flex;
+  align-items: stretch;
+}
+
+.config-row > .el-col {
+  display: flex;
+}
+
 /* 卡片样式 */
 .config-card,
 .chart-card,
@@ -453,6 +463,31 @@ onMounted(() => {
   border-radius: 12px;
   border: none;
   margin-bottom: 20px;
+  width: 100%;
+}
+
+.config-card,
+.chart-card {
+  display: flex;
+  flex-direction: column;
+}
+
+.config-card :deep(.el-card__body),
+.chart-card :deep(.el-card__body) {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.config-card :deep(.el-form) {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.config-card :deep(.el-form-item:last-child) {
+  margin-top: auto;
+  margin-bottom: 0;
 }
 
 .card-title {
@@ -479,7 +514,9 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   align-items: center;
+  justify-content: center;
   padding: 20px 0;
+  flex: 1;
 }
 
 .chart-ring {

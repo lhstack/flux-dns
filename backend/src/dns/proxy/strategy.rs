@@ -162,11 +162,12 @@ impl ProxyManager {
         let mut handles = Vec::with_capacity(servers.len());
 
         // Spawn concurrent queries to all servers
-        for server in servers {
+        for server in servers.clone() {
             let q = query.clone();
             let tid = trace_id.to_string();
             let server_name = server.name.clone();
             let server_addr = server.address.clone();
+            let server_id = server.id;
             let protocol = server.protocol;
             let token = cancel_token.clone();
             
@@ -176,7 +177,8 @@ impl ProxyManager {
                 select! {
                     _ = token.cancelled() => {
                         debug!("[{}] [Concurrent] Query to {} cancelled", tid, server_name);
-                        Err(anyhow!("Query cancelled"))
+                        // Return None to indicate cancelled (not a failure)
+                        None
                     }
                     result = async {
                         let client = create_client(server);
@@ -190,7 +192,7 @@ impl ProxyManager {
                             ),
                             Err(e) => warn!("[{}] [Concurrent] {} failed: {}", tid, server_name, e),
                         }
-                        result
+                        Some((server_id, result))
                     }
                 }
             });
@@ -210,7 +212,7 @@ impl ProxyManager {
             handles = remaining;
 
             match result {
-                Ok(Ok(query_result)) => {
+                Ok(Some((_server_id, Ok(query_result)))) => {
                     let response_code = &query_result.response.response_code;
                     // Accept NoError and NxDomain as valid responses
                     if *response_code == DnsResponseCode::NoError || *response_code == DnsResponseCode::NxDomain {
@@ -240,8 +242,13 @@ impl ProxyManager {
                         last_error = Some(format!("{} returned {}", query_result.server_name, response_code));
                     }
                 }
-                Ok(Err(e)) => {
+                Ok(Some((server_id, Err(e)))) => {
+                    // Record failure for this server
+                    self.upstream_manager.record_failure(server_id).await;
                     last_error = Some(e.to_string());
+                }
+                Ok(None) => {
+                    // Query was cancelled, don't count as failure
                 }
                 Err(e) => {
                     last_error = Some(format!("Task panicked: {}", e));

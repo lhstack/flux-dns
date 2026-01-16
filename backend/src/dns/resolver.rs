@@ -125,20 +125,34 @@ impl DnsResolver {
     /// Resolve a DNS query
     ///
     /// This is the main entry point for DNS resolution. It follows this flow:
-    /// 1. Check if record type is disabled
-    /// 2. Check rewrite rules
-    /// 3. If rewrite matches, apply the action
-    /// 4. Check local DNS records from database
-    /// 5. Otherwise, check cache
-    /// 6. If cache miss, query upstream via proxy
-    /// 7. Cache the response
+    /// 1. Validate domain name (reject invalid domains)
+    /// 2. Check if record type is disabled
+    /// 3. Check rewrite rules
+    /// 4. If rewrite matches, apply the action
+    /// 5. Check local DNS records from database
+    /// 6. Otherwise, check cache
+    /// 7. If cache miss, query upstream via proxy
+    /// 8. Cache the response
     pub async fn resolve(&self, query: &DnsQuery) -> Result<ResolveResult> {
         let start = Instant::now();
         let mut metadata = QueryMetadata::default();
 
+        // Step 0: Validate domain name - reject invalid domains
+        if !Self::is_valid_domain(&query.name) {
+            info!(
+                "[DNS Result] {} {} | Invalid domain (rejected) | {}ms",
+                query.name, query.record_type, start.elapsed().as_millis()
+            );
+            metadata.response_time_ms = start.elapsed().as_millis() as u64;
+            return Ok(ResolveResult {
+                response: DnsResponse::refused(query.id),
+                metadata,
+            });
+        }
+
         info!("[DNS Query] {} {} (ID: {})", query.name, query.record_type, query.id);
 
-        // Step 0: Check if record type is disabled
+        // Step 1: Check if record type is disabled
         if let Some(ref db) = self.db {
             if self.is_record_type_disabled(db, &query.record_type.to_string()).await {
                 info!(
@@ -153,7 +167,7 @@ impl DnsResolver {
             }
         }
 
-        // Step 1: Check rewrite rules
+        // Step 2: Check rewrite rules
         if let Some(rewrite_result) = self.rewrite_engine.check(&query.name).await {
             metadata.rewrite_applied = true;
             metadata.rewrite_rule_id = Some(rewrite_result.rule_id);
@@ -238,6 +252,71 @@ impl DnsResolver {
             response,
             metadata,
         })
+    }
+
+    /// Check if domain name is valid according to DNS standards
+    /// 
+    /// Valid domain names must:
+    /// - Only contain ASCII letters (a-z, A-Z), digits (0-9), hyphens (-), dots (.), and underscores (_)
+    /// - Not contain protocol prefixes (://)
+    /// - Not contain special characters or Unicode (browsers convert IDN to Punycode)
+    /// - Be between 1-253 characters total
+    /// - Have labels (parts between dots) of 1-63 characters each
+    fn is_valid_domain(name: &str) -> bool {
+        // Check length
+        if name.is_empty() || name.len() > 253 {
+            return false;
+        }
+        
+        // Check for protocol prefixes (http://, https://, etc.)
+        if name.contains("://") {
+            return false;
+        }
+        
+        // Check for escaped slashes (common in malformed queries)
+        if name.contains("\\/") || name.contains("\\\\") {
+            return false;
+        }
+        
+        // Check for other invalid characters
+        // Valid DNS characters: a-z, A-Z, 0-9, hyphen (-), dot (.), underscore (_)
+        // Note: Underscore is technically not standard but widely used (e.g., _dmarc, _spf)
+        for ch in name.chars() {
+            match ch {
+                'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '.' | '_' => continue,
+                _ => {
+                    // Reject any non-ASCII or special characters
+                    // This includes Chinese characters, emojis, spaces, etc.
+                    // Browsers should convert IDN domains to Punycode (xn--...) before DNS query
+                    return false;
+                }
+            }
+        }
+        
+        // Check each label (part between dots)
+        for label in name.split('.') {
+            // Empty labels are invalid (consecutive dots or leading/trailing dot)
+            // Exception: trailing dot is valid for FQDN (e.g., "example.com.")
+            if label.is_empty() {
+                // Allow single trailing dot (FQDN)
+                if name.ends_with('.') && name.matches('.').count() == name.split('.').count() - 1 {
+                    continue;
+                }
+                return false;
+            }
+            
+            // Label length must be 1-63 characters
+            if label.len() > 63 {
+                return false;
+            }
+            
+            // Labels cannot start or end with hyphen
+            if label.starts_with('-') || label.ends_with('-') {
+                return false;
+            }
+        }
+        
+        true
     }
 
     /// Check if a record type is disabled in settings
@@ -699,5 +778,72 @@ mod tests {
         assert!(metadata.upstream_used.is_none());
         assert!(!metadata.rewrite_applied);
         assert!(metadata.rewrite_rule_id.is_none());
+    }
+
+    // Domain validation tests
+    #[test]
+    fn test_valid_domains() {
+        // Standard domains
+        assert!(DnsResolver::is_valid_domain("example.com"));
+        assert!(DnsResolver::is_valid_domain("sub.example.com"));
+        assert!(DnsResolver::is_valid_domain("a.b.c.example.com"));
+        assert!(DnsResolver::is_valid_domain("example123.com"));
+        assert!(DnsResolver::is_valid_domain("123.com"));
+        assert!(DnsResolver::is_valid_domain("my-domain.com"));
+        
+        // Punycode (IDN) domains - these are valid
+        assert!(DnsResolver::is_valid_domain("xn--4gq62f52gdss.com")); // 一元机场.com
+        assert!(DnsResolver::is_valid_domain("xn--n3h.com")); // emoji domain
+        
+        // FQDN with trailing dot
+        assert!(DnsResolver::is_valid_domain("example.com."));
+        
+        // Underscore (used in DNS records like _dmarc, _spf)
+        assert!(DnsResolver::is_valid_domain("_dmarc.example.com"));
+        assert!(DnsResolver::is_valid_domain("_spf.example.com"));
+    }
+
+    #[test]
+    fn test_invalid_domains() {
+        // Protocol prefixes
+        assert!(!DnsResolver::is_valid_domain("http://example.com"));
+        assert!(!DnsResolver::is_valid_domain("https://example.com"));
+        assert!(!DnsResolver::is_valid_domain("ftp://example.com"));
+        
+        // Chinese characters (should use Punycode)
+        assert!(!DnsResolver::is_valid_domain("一元机场.com"));
+        assert!(!DnsResolver::is_valid_domain("中文.com"));
+        assert!(!DnsResolver::is_valid_domain("测试.example.com"));
+        
+        // Special characters
+        assert!(!DnsResolver::is_valid_domain("example.com/path"));
+        assert!(!DnsResolver::is_valid_domain("example.com?query"));
+        assert!(!DnsResolver::is_valid_domain("example.com#anchor"));
+        assert!(!DnsResolver::is_valid_domain("example.com:8080"));
+        assert!(!DnsResolver::is_valid_domain("user@example.com"));
+        assert!(!DnsResolver::is_valid_domain("example .com"));
+        assert!(!DnsResolver::is_valid_domain("example\t.com"));
+        
+        // Escaped characters
+        assert!(!DnsResolver::is_valid_domain("example\\.com"));
+        assert!(!DnsResolver::is_valid_domain("example\\\\com"));
+        
+        // Empty or too long
+        assert!(!DnsResolver::is_valid_domain(""));
+        assert!(!DnsResolver::is_valid_domain(&"a".repeat(254)));
+        
+        // Label too long (>63 chars)
+        let long_label = format!("{}.com", "a".repeat(64));
+        assert!(!DnsResolver::is_valid_domain(&long_label));
+        
+        // Invalid label format
+        assert!(!DnsResolver::is_valid_domain("-example.com")); // starts with hyphen
+        assert!(!DnsResolver::is_valid_domain("example-.com")); // ends with hyphen
+        assert!(!DnsResolver::is_valid_domain("..example.com")); // consecutive dots
+        assert!(!DnsResolver::is_valid_domain(".example.com")); // leading dot
+        
+        // Emojis
+        assert!(!DnsResolver::is_valid_domain("😀.com"));
+        assert!(!DnsResolver::is_valid_domain("example😀.com"));
     }
 }

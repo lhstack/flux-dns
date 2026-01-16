@@ -104,12 +104,18 @@
             />
           </template>
         </el-table-column>
-        <el-table-column label="统计" width="160">
+        <el-table-column label="统计" width="220">
           <template #default="{ row }">
             <div class="stats-cell">
               <div class="stats-item">
                 <span class="stats-label">查询</span>
                 <span class="stats-value">{{ getServerStats(row.id)?.queries || 0 }}</span>
+              </div>
+              <div class="stats-item">
+                <span class="stats-label">成功率</span>
+                <span class="stats-value" :class="getSuccessRateClass(getServerStats(row.id)?.success_rate)">
+                  {{ formatSuccessRate(getServerStats(row.id)?.success_rate) }}
+                </span>
               </div>
               <div class="stats-item">
                 <span class="stats-label">延迟</span>
@@ -118,10 +124,19 @@
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="140" fixed="right">
+        <el-table-column label="操作" width="200" fixed="right">
           <template #default="{ row }">
             <el-button type="primary" link @click="openEditDialog(row)">
               <el-icon><Edit /></el-icon> 编辑
+            </el-button>
+            <el-button
+              v-if="canResetHealth(row)"
+              type="warning"
+              link
+              @click="resetHealth(row)"
+              :loading="resettingHealth === row.id"
+            >
+              <el-icon><RefreshRight /></el-icon> 恢复
             </el-button>
             <el-button type="danger" link @click="confirmDelete(row)">
               <el-icon><Delete /></el-icon> 删除
@@ -212,7 +227,7 @@
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
-import { Plus, Edit, Delete, Connection, CircleCheck, Warning, DataAnalysis } from '@element-plus/icons-vue'
+import { Plus, Edit, Delete, Connection, CircleCheck, Warning, DataAnalysis, RefreshRight } from '@element-plus/icons-vue'
 import api from '../api'
 
 interface UpstreamServer {
@@ -234,8 +249,12 @@ interface ServerStatus {
   enabled: boolean
   healthy: boolean
   queries: number
+  successes: number
   failures: number
+  success_rate: number
   avg_response_time_ms: number
+  suspended: boolean
+  suspension_remaining_secs: number | null
 }
 
 const servers = ref<UpstreamServer[]>([])
@@ -246,6 +265,7 @@ const isEditing = ref(false)
 const submitting = ref(false)
 const formRef = ref<FormInstance>()
 const editingId = ref<number | null>(null)
+const resettingHealth = ref<number | null>(null)
 let statusInterval: ReturnType<typeof setInterval> | null = null
 
 const pagination = reactive({
@@ -311,6 +331,7 @@ function getStatusTag(server: UpstreamServer): string {
   if (!server.enabled) return 'info'
   const status = serverStatus.value.get(server.id)
   if (!status) return 'info'
+  if (status.suspended) return 'warning'
   return status.healthy ? 'success' : 'danger'
 }
 
@@ -318,6 +339,13 @@ function getStatusLabel(server: UpstreamServer): string {
   if (!server.enabled) return '已禁用'
   const status = serverStatus.value.get(server.id)
   if (!status) return '未知'
+  if (status.suspended) {
+    const remaining = status.suspension_remaining_secs
+    if (remaining && remaining > 0) {
+      return `暂停${remaining}s`
+    }
+    return '暂停中'
+  }
   return status.healthy ? '健康' : '异常'
 }
 
@@ -330,6 +358,38 @@ function formatResponseTime(ms: number | undefined): string {
   // 如果是 u64::MAX 或非常大的数字，说明没有数据
   if (ms > 100000) return '-'
   return `${Math.round(ms)}ms`
+}
+
+function formatSuccessRate(rate: number | undefined): string {
+  if (rate === undefined || rate === null) return '-'
+  return `${(rate * 100).toFixed(1)}%`
+}
+
+function getSuccessRateClass(rate: number | undefined): string {
+  if (rate === undefined || rate === null) return ''
+  if (rate >= 0.95) return 'success-rate-good'
+  if (rate >= 0.8) return 'success-rate-warning'
+  return 'success-rate-danger'
+}
+
+function canResetHealth(server: UpstreamServer): boolean {
+  if (!server.enabled) return false
+  const status = serverStatus.value.get(server.id)
+  if (!status) return false
+  return status.suspended || !status.healthy
+}
+
+async function resetHealth(server: UpstreamServer) {
+  resettingHealth.value = server.id
+  try {
+    await api.post(`/api/upstreams/${server.id}/reset-health`)
+    ElMessage.success(`服务器 "${server.name}" 健康状态已重置`)
+    fetchStatus()
+  } catch (error: any) {
+    ElMessage.error(error.response?.data?.message || '重置健康状态失败')
+  } finally {
+    resettingHealth.value = null
+  }
 }
 
 function getAddressPlaceholder(protocol: string): string {
@@ -619,6 +679,18 @@ onUnmounted(() => {
   font-size: 13px;
   font-weight: 500;
   color: #303133;
+}
+
+.stats-value.success-rate-good {
+  color: #67c23a;
+}
+
+.stats-value.success-rate-warning {
+  color: #e6a23c;
+}
+
+.stats-value.success-rate-danger {
+  color: #f56c6c;
 }
 
 .pagination-container {
