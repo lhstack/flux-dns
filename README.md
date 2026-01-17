@@ -1,6 +1,15 @@
 # FluxDNS
 
 一个功能完整的 DNS 代理服务，支持多种协议和 Web 管理界面。
+## 演示地址
+### [fluxdns](https://fluxdns.lhstack.xyz)
+用户名: `admin`
+
+密码: `admin`
+
+doh: `https://fluxdns.lhstack.xyz/dns-query`
+
+example: `curl https://fluxdns.lhstack.xyz/dns-query?dns=q80BAAABAAAAAAAAA3d3dwdleGFtcGxlA2NvbQAAAQAB`
 ## 演示图
 ![1](./images/1.png)
 ![2](./images/2.png)
