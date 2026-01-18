@@ -15,4 +15,5 @@ pub struct AppState {
     pub proxy: Arc<ProxyManager>,
     pub rewrite_engine: Arc<RewriteEngine>,
     pub upstream_manager: Arc<UpstreamManager>,
+    pub listener_manager: Arc<crate::services::listener_manager::ListenerManager>,
 }

@@ -220,9 +220,22 @@ pub async fn auth_middleware(
         .get("Authorization")
         .and_then(|h| h.to_str().ok());
 
-    let token = match auth_header {
-        Some(header) => AuthService::extract_token_from_header(header),
-        None => None,
+    let header_token = auth_header.and_then(AuthService::extract_token_from_header);
+
+    let token = if let Some(t) = header_token {
+        Some(t.to_string())
+    } else {
+        // Fallback: Try to extract from query string
+        request.uri().query().and_then(|query| {
+            query.split('&').find_map(|pair| {
+                let mut parts = pair.split('=');
+                if parts.next() == Some("token") {
+                    parts.next().map(|s| s.to_string())
+                } else {
+                    None
+                }
+            })
+        })
     };
 
     let token = token.ok_or_else(|| ApiError {
@@ -232,7 +245,7 @@ pub async fn auth_middleware(
     })?;
 
     // Verify token
-    state.auth_service.verify_token(token).map_err(|e| ApiError {
+    state.auth_service.verify_token(&token).map_err(|e| ApiError {
         code: "UNAUTHORIZED".to_string(),
         message: e.to_string(),
         details: None,

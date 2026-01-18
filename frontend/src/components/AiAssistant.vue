@@ -110,6 +110,28 @@
             </div>
           </div>
 
+          <!-- 快捷指令面板 (空状态) -->
+          <div v-if="messages.length === 0 && !isLoading" class="quick-commands-panel">
+            <div class="welcome-text">
+              <h2>FluxDNS AI 助手</h2>
+              <p>我是您的智能 DNS 管理专家。您可以直接提问，或选择以下快捷指令：</p>
+            </div>
+            <div class="commands-grid">
+              <div 
+                v-for="(cmd, index) in quickCommands" 
+                :key="index" 
+                class="command-card"
+                @click="sendQuickMessage(cmd.prompt)"
+              >
+                <el-icon class="command-icon" :size="24"><component :is="cmd.icon" /></el-icon>
+                <div class="command-info">
+                  <div class="command-title">{{ cmd.title }}</div>
+                  <div class="command-desc">{{ cmd.description }}</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
           <!-- 消息流 -->
           <div v-for="(msg, index) in messages" :key="index" class="message-row" :class="msg.role">
             <div class="message-wrapper">
@@ -118,7 +140,8 @@
                 <el-icon v-else :size="16"><User /></el-icon>
               </div>
               <div class="message-bubble">
-                <div class="message-content markdown-body" v-html="formatMessage(msg.content)"></div>
+                <div v-if="msg.role === 'assistant'" class="message-content markdown-body" v-html="formatMessage(msg.content)"></div>
+                <div v-else class="message-content markdown-body user-content" v-html="formatMessage(msg.content)"></div>
                 
                 <!-- Function 调用结果展示 -->
                 <div v-if="msg.functionResults && msg.functionResults.length > 0" class="function-results">
@@ -273,10 +296,12 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, nextTick, watch } from 'vue'
 import { useRoute } from 'vue-router'
+import { renderMarkdown } from '../utils/markdown'
+import 'highlight.js/styles/atom-one-dark.css' // Code highlight theme
 import {
   ChatDotRound, Monitor, Delete, Close, MagicStick, User, Operation, 
-  Promotion, InfoFilled, FullScreen, CopyDocument, ArrowDown, Cpu,
-  ArrowRight, Loading, Clock, Plus
+  ArrowRight, Loading, Clock, Plus, DataLine, FirstAidKit, 
+  Timer, Connection
 } from '@element-plus/icons-vue'
 import api from '../api'
 
@@ -285,6 +310,21 @@ interface ToolDefinition {
   name: string
   description: string
   parameters: any
+}
+
+interface QuickCommand {
+  icon: any
+  title: string
+  prompt: string
+  description: string
+}
+
+interface Session {
+  id: string
+  title: string
+  created_at: string
+  updated_at: string
+  message_count: number
 }
 
 // 类型定义
@@ -324,13 +364,6 @@ const toolLoading = ref(false)
 const tools = ref<ToolDefinition[]>([])
 
 // 会话管理状态
-interface Session {
-  id: string
-  title: string
-  created_at: string
-  updated_at: string
-  message_count: number
-}
 const sessions = ref<Session[]>([])
 const currentSessionId = ref<string | null>(null)
 const showSessionList = ref(false)
@@ -340,6 +373,34 @@ const sessionLoading = ref(false)
 const position = ref({ x: 0, y: 0 })
 const isDragging = ref(false)
 const dragStart = ref({ x: 0, y: 0 })
+
+// 快捷指令配置
+const quickCommands: QuickCommand[] = [
+  {
+    icon: FirstAidKit,
+    title: '系统健康检查',
+    prompt: '请检查当前系统状态，包括上游服务器健康状况、缓存命中率和系统资源使用情况。',
+    description: '全面诊断系统运行状况'
+  },
+  {
+    icon: DataLine,
+    title: '近24h查询分析',
+    prompt: '请分析最近24小时的查询日志，找出查询量最高的域名、客户端IP，并检测是否有异常流量模式。',
+    description: '分析查询趋势和异常'
+  },
+  {
+    icon: Timer,
+    title: '性能瓶颈诊断',
+    prompt: '请分析系统的平均响应时间，检查是否存在高延迟的上游服务器，并给出优化建议。',
+    description: '发现并解决延迟问题'
+  },
+  {
+    icon: Connection,
+    title: '上游服务器检视',
+    prompt: '请列出所有上游服务器的详细状态，包括启用状态、健康检查失败次数和响应时间统计。',
+    description: '管理和评估上游节点'
+  }
+]
 
 const chatStyle = computed(() => ({
   transform: `translate(${position.value.x}px, ${position.value.y}px)`
@@ -526,31 +587,7 @@ async function checkConfiguration() {
 
 function formatMessage(content: string): string {
   if (!content) return ''
-  // 增强的 Markdown 处理
-  let html = content
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-  
-  // 代码块 ```code```
-  html = html.replace(/```([\s\S]*?)```/g, '<pre><code>$1</code></pre>')
-  
-  // 行内代码 `code`
-  html = html.replace(/`([^`]+)`/g, '<code class="inline-code">$1</code>')
-  
-  // 加粗 **text**
-  html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-  
-  // 列表 - item
-  html = html.replace(/^\s*-\s+(.*)$/gm, '<li>$1</li>')
-  // 将连续的 li 包裹在 ul 中 (简单处理)
-  // 这里正则可能不够完美，但对于简单的 LLM 输出足够
-  html = html.replace(/(<li>.*<\/li>)/s, '<ul>$1</ul>')
-  
-  // 换行
-  html = html.replace(/\n/g, '<br>')
-  
-  return html
+  return renderMarkdown(content)
 }
 
 function handleEnter(e: KeyboardEvent) {
@@ -902,7 +939,7 @@ onMounted(() => {
   position: fixed;
   bottom: 100px;
   right: 24px;
-  width: 480px; /* 加宽 */
+  width: 540px; /* 加宽以支持单行指令显示 */
   height: 700px;
   max-height: calc(100vh - 120px);
   z-index: 2001;
@@ -1402,6 +1439,112 @@ onMounted(() => {
   color: #fff;
 }
 
+/* Markdown Styles */
+:deep(.markdown-body) {
+  font-size: 14px;
+  line-height: 1.6;
+  color: inherit;
+}
+
+:deep(.markdown-body p) {
+  margin-bottom: 0.8em;
+}
+
+:deep(.markdown-body p:last-child) {
+  margin-bottom: 0;
+}
+
+:deep(.markdown-body h1),
+:deep(.markdown-body h2),
+:deep(.markdown-body h3),
+:deep(.markdown-body h4) {
+  margin-top: 1em;
+  margin-bottom: 0.5em;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+:deep(.markdown-body h1) { font-size: 1.5em; }
+:deep(.markdown-body h2) { font-size: 1.3em; }
+:deep(.markdown-body h3) { font-size: 1.1em; }
+
+:deep(.markdown-body ul),
+:deep(.markdown-body ol) {
+  padding-left: 1.5em;
+  margin-bottom: 0.8em;
+}
+
+:deep(.markdown-body li) {
+  margin-bottom: 0.3em;
+}
+
+:deep(.markdown-body blockquote) {
+  margin: 0.8em 0;
+  padding: 0.5em 1em;
+  border-left: 4px solid var(--el-color-primary);
+  background-color: var(--el-fill-color-light);
+  color: var(--el-text-color-secondary);
+  border-radius: 0 4px 4px 0;
+}
+
+:deep(.markdown-body code) {
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 0.9em;
+  padding: 0.2em 0.4em;
+  background-color: rgba(175, 184, 193, 0.2);
+  border-radius: 4px;
+}
+
+:deep(.markdown-body pre) {
+  background-color: #282c34;
+  border-radius: 6px;
+  padding: 1em;
+  margin: 0.8em 0;
+  overflow-x: auto;
+}
+
+:deep(.markdown-body pre code) {
+  background-color: transparent;
+  padding: 0;
+  color: #abb2bf;
+  font-size: 0.9em;
+}
+
+:deep(.markdown-body table) {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 0.8em 0;
+}
+
+:deep(.markdown-body th),
+:deep(.markdown-body td) {
+  border: 1px solid var(--el-border-color-lighter);
+  padding: 0.5em;
+}
+
+:deep(.markdown-body th) {
+  background-color: var(--el-fill-color-light);
+  font-weight: 600;
+}
+
+:deep(.markdown-body a) {
+  color: var(--el-color-primary);
+  text-decoration: none;
+}
+
+:deep(.markdown-body a:hover) {
+  text-decoration: underline;
+}
+
+/* User Message Specific Overrides */
+.user-content :deep(.markdown-body code) {
+  background-color: rgba(255, 255, 255, 0.2);
+  color: white;
+}
+
+.user-content :deep(.markdown-body pre) {
+  background-color: rgba(0, 0, 0, 0.3);
+}
 .overlay-content {
   flex: 1;
   overflow-y: auto;
@@ -1621,5 +1764,89 @@ onMounted(() => {
 .session-delete:hover {
   color: #ef4444;
   background: rgba(239, 68, 68, 0.2);
+}
+/* Quick Commands Panel */
+.quick-commands-panel {
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  height: 100%;
+}
+
+.welcome-text {
+  text-align: center;
+  margin-bottom: 32px;
+}
+
+.welcome-text h2 {
+  font-size: 24px;
+  color: rgba(255, 255, 255, 0.95);
+  margin-bottom: 12px;
+  font-weight: 600;
+  text-shadow: 0 2px 10px rgba(0, 0, 0, 0.2);
+}
+
+.welcome-text p {
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 14px;
+}
+
+.commands-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 16px;
+  max-width: 600px;
+  margin: 0 auto;
+}
+
+.command-card {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 16px;
+  padding: 20px;
+  cursor: pointer;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  backdrop-filter: blur(10px);
+  min-height: 100px;
+  box-sizing: border-box;
+}
+
+.command-card:hover {
+  transform: translateY(-4px);
+  background: rgba(255, 255, 255, 0.08);
+  border-color: var(--el-color-primary);
+  box-shadow: 0 10px 20px rgba(0, 0, 0, 0.2);
+}
+
+.command-icon {
+  padding: 10px;
+  border-radius: 12px;
+  background: rgba(147, 51, 234, 0.2);
+  color: #c084fc;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 2px;
+  flex-shrink: 0;
+}
+
+.command-info {
+  flex: 1;
+}
+
+.command-title {
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.9);
+  margin-bottom: 4px;
+  font-size: 15px;
+}
+
+.command-desc {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.4);
 }
 </style>

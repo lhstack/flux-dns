@@ -94,7 +94,6 @@
                   <el-input
                     v-model="listener.bind_address"
                     placeholder="0.0.0.0"
-                    :disabled="!listener.enabled"
                   >
                     <template #prefix>
                       <el-icon><Location /></el-icon>
@@ -108,7 +107,6 @@
                     v-model="listener.port"
                     :min="1"
                     :max="65535"
-                    :disabled="!listener.enabled"
                     style="width: 100%"
                   />
                 </el-form-item>
@@ -130,16 +128,22 @@
                         type="primary" 
                         size="small" 
                         @click="openCertDialog(listener, 'cert')"
-                        :disabled="!listener.enabled"
                       >
                         {{ listener.has_tls_cert ? '更新证书' : '配置证书' }}
+                      </el-button>
+                      <el-button 
+                        v-if="listener.has_tls_cert"
+                        type="info" 
+                        size="small" 
+                        @click="viewCertificate(listener)"
+                      >
+                        查看
                       </el-button>
                       <el-button 
                         v-if="listener.has_tls_cert"
                         type="danger" 
                         size="small" 
                         @click="clearCert(listener, 'cert')"
-                        :disabled="!listener.enabled"
                       >
                         清除
                       </el-button>
@@ -155,7 +159,6 @@
                         type="primary" 
                         size="small" 
                         @click="openCertDialog(listener, 'key')"
-                        :disabled="!listener.enabled"
                       >
                         {{ listener.has_tls_key ? '更新私钥' : '配置私钥' }}
                       </el-button>
@@ -164,7 +167,6 @@
                         type="danger" 
                         size="small" 
                         @click="clearCert(listener, 'key')"
-                        :disabled="!listener.enabled"
                       >
                         清除
                       </el-button>
@@ -192,7 +194,6 @@
                 type="primary"
                 @click="saveListener(listener)"
                 :loading="saving[listener.protocol]"
-                :disabled="!listener.enabled"
               >
                 <el-icon><Check /></el-icon>
                 保存配置
@@ -270,6 +271,49 @@
         </el-button>
       </template>
     </el-dialog>
+
+    <!-- 证书信息对话框 -->
+    <el-dialog
+      v-model="certInfoDialogVisible"
+      title="证书信息"
+      width="500px"
+      class="cert-info-dialog"
+    >
+      <div v-if="certInfoLoading" v-loading="true" style="height: 200px;"></div>
+      <div v-else-if="certInfo" class="cert-info-content">
+        <el-descriptions :column="1" border>
+          <el-descriptions-item label="主题 (Subject)">
+            <code>{{ certInfo.subject }}</code>
+          </el-descriptions-item>
+          <el-descriptions-item label="颁发者 (Issuer)">
+            <code>{{ certInfo.issuer }}</code>
+          </el-descriptions-item>
+          <el-descriptions-item label="有效期开始">
+            {{ certInfo.not_before }}
+          </el-descriptions-item>
+          <el-descriptions-item label="有效期结束">
+            <span :class="{ 'is-expired': certInfo.is_expired }">
+              {{ certInfo.not_after }}
+            </span>
+          </el-descriptions-item>
+          <el-descriptions-item label="状态">
+            <el-tag v-if="certInfo.is_expired" type="danger">已过期</el-tag>
+            <el-tag v-else-if="certInfo.days_until_expiry < 30" type="warning">
+              {{ certInfo.days_until_expiry }} 天后过期
+            </el-tag>
+            <el-tag v-else type="success">
+              还有 {{ certInfo.days_until_expiry }} 天有效期
+            </el-tag>
+          </el-descriptions-item>
+          <el-descriptions-item label="序列号">
+            <code>{{ certInfo.serial_number }}</code>
+          </el-descriptions-item>
+        </el-descriptions>
+      </div>
+      <template #footer>
+        <el-button @click="certInfoDialogVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -282,6 +326,16 @@ import {
 } from '@element-plus/icons-vue'
 import api from '../api'
 
+interface CertInfo {
+  subject: string
+  issuer: string
+  not_before: string
+  not_after: string
+  serial_number: string
+  is_expired: boolean
+  days_until_expiry: number
+}
+
 interface Listener {
   protocol: string
   enabled: boolean
@@ -291,6 +345,8 @@ interface Listener {
   has_tls_key: boolean
   requires_tls: boolean
   description: string
+  tls_cert?: string
+  tls_key?: string
 }
 
 const listeners = ref<Listener[]>([])
@@ -313,6 +369,11 @@ const certContent = ref('')
 const certType = ref<'cert' | 'key'>('cert')
 const currentListener = ref<Listener | null>(null)
 const savingCert = ref(false)
+
+// 证书信息对话框
+const certInfoDialogVisible = ref(false)
+const certInfo = ref<CertInfo | null>(null)
+const certInfoLoading = ref(false)
 
 const certDialogTitle = computed(() => {
   if (!currentListener.value) return ''
@@ -399,7 +460,14 @@ async function saveListener(listener: Listener) {
 function openCertDialog(listener: Listener, type: 'cert' | 'key') {
   currentListener.value = listener
   certType.value = type
-  certContent.value = ''
+  // Pre-fill with existing content if available
+  if (type === 'cert' && listener.tls_cert) {
+    certContent.value = listener.tls_cert
+  } else if (type === 'key' && listener.tls_key) {
+    certContent.value = listener.tls_key
+  } else {
+    certContent.value = ''
+  }
   certInputMode.value = 'paste'
   certDialogVisible.value = true
 }
@@ -468,6 +536,22 @@ async function clearCert(listener: Listener, type: 'cert' | 'key') {
     }
   } finally {
     saving[listener.protocol] = false
+  }
+}
+
+async function viewCertificate(listener: Listener) {
+  certInfoDialogVisible.value = true
+  certInfoLoading.value = true
+  certInfo.value = null
+  
+  try {
+    const response = await api.get(`/api/listeners/${listener.protocol}/cert`)
+    certInfo.value = response.data
+  } catch (error: any) {
+    ElMessage.error(error.response?.data?.message || '获取证书信息失败')
+    certInfoDialogVisible.value = false
+  } finally {
+    certInfoLoading.value = false
   }
 }
 

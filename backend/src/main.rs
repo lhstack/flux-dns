@@ -11,6 +11,7 @@ mod error;
 mod llm;
 mod log;
 mod state;
+mod services;
 mod web;
 
 use anyhow::Result;

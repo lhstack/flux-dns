@@ -166,6 +166,8 @@ pub struct QueryLogFilter {
     pub query_type: Option<String>,
     pub client_ip: Option<String>,
     pub cache_hit: Option<bool>,
+    pub start_time: Option<DateTime<Utc>>,
+    pub end_time: Option<DateTime<Utc>>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
 }

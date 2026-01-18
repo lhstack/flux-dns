@@ -4,224 +4,302 @@
     <div class="page-header">
       <div class="header-left">
         <h1>仪表盘</h1>
-        <p class="subtitle">系统运行状态概览</p>
+        <p class="subtitle">实时系统监控</p>
       </div>
       <div class="header-right">
-        <el-tag :type="stats.status === 'running' ? 'success' : 'danger'" size="large" effect="dark">
-          <el-icon class="status-icon"><CircleCheck v-if="stats.status === 'running'" /><CircleClose v-else /></el-icon>
-          {{ stats.status === 'running' ? '运行中' : '异常' }}
+        <el-tag :type="isConnected ? 'success' : 'danger'" size="large" effect="dark">
+          <el-icon class="status-icon"><CircleCheck v-if="isConnected" /><CircleClose v-else /></el-icon>
+          {{ isConnected ? '实时连接' : '连接断开' }}
         </el-tag>
       </div>
     </div>
 
     <!-- 核心指标 -->
     <el-row :gutter="20" class="stats-row">
-      <el-col :xs="24" :sm="12" :lg="6">
+      <el-col :xs="24" :sm="8" :lg="6">
         <div class="stat-card">
           <div class="stat-icon" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);">
             <el-icon><DataAnalysis /></el-icon>
           </div>
           <div class="stat-info">
-            <span class="stat-value">{{ stats.query?.total_queries || 0 }}</span>
-            <span class="stat-label">总查询数</span>
+            <span class="stat-value">{{ currentStats.total_queries || 0 }}</span>
+            <span class="stat-label">今日查询总数</span>
           </div>
         </div>
       </el-col>
-      <el-col :xs="24" :sm="12" :lg="6">
+      <el-col :xs="24" :sm="8" :lg="6">
         <div class="stat-card">
           <div class="stat-icon" style="background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);">
+            <el-icon><Odometer /></el-icon>
+          </div>
+          <div class="stat-info">
+            <span class="stat-value">{{ currentStats.qps?.toFixed(1) || 0 }}</span>
+            <span class="stat-label">当前 QPS</span>
+          </div>
+        </div>
+      </el-col>
+      <el-col :xs="24" :sm="8" :lg="6">
+        <div class="stat-card">
+          <div class="stat-icon" style="background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);">
             <el-icon><TrendCharts /></el-icon>
           </div>
           <div class="stat-info">
-            <span class="stat-value">{{ ((stats.cache?.hit_rate || 0) * 100).toFixed(1) }}%</span>
+            <span class="stat-value">{{ ((currentStats.cache_hit_rate || 0) * 100).toFixed(1) }}%</span>
             <span class="stat-label">缓存命中率</span>
           </div>
         </div>
       </el-col>
-      <el-col :xs="24" :sm="12" :lg="6">
-        <div class="stat-card">
-          <div class="stat-icon" style="background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);">
-            <el-icon><Coin /></el-icon>
-          </div>
-          <div class="stat-info">
-            <span class="stat-value">{{ stats.cache?.entries || 0 }}</span>
-            <span class="stat-label">缓存条目</span>
-          </div>
-        </div>
-      </el-col>
-      <el-col :xs="24" :sm="12" :lg="6">
+      <el-col :xs="24" :sm="8" :lg="6">
         <div class="stat-card">
           <div class="stat-icon" style="background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);">
-            <el-icon><Timer /></el-icon>
+            <el-icon><Stopwatch /></el-icon>
           </div>
           <div class="stat-info">
-            <span class="stat-value">{{ formatUptime(stats.uptime_seconds || 0) }}</span>
-            <span class="stat-label">运行时间</span>
+            <span class="stat-value">{{ currentStats.avg_latency_ms?.toFixed(1) || 0 }}<small>ms</small></span>
+            <span class="stat-label">平均延迟</span>
           </div>
         </div>
       </el-col>
     </el-row>
 
-    <!-- 详细信息卡片 -->
+    <!-- 图表区域 -->
+    <el-row :gutter="20" class="chart-row">
+      <el-col :span="24">
+        <el-card shadow="never" class="chart-card">
+          <template #header>
+            <div class="card-header">
+              <span class="header-title">流量趋势 (QPS & Latency)</span>
+            </div>
+          </template>
+          <div class="chart-container">
+            <v-chart class="chart" :option="chartOption" autoresize />
+          </div>
+        </el-card>
+      </el-col>
+    </el-row>
+
+    <!-- 排行榜 -->
+    <el-row :gutter="20" class="rank-row">
+      <el-col :xs="24" :md="12">
+        <TopDomainsCard />
+      </el-col>
+      <el-col :xs="24" :md="12">
+        <TopClientsCard />
+      </el-col>
+    </el-row>
+
+    <!-- 上游服务器状态 -->
     <el-row :gutter="20" class="detail-row">
-      <el-col :xs="24" :md="12">
-        <el-card class="detail-card" shadow="never">
+      <el-col :span="24">
+        <el-card shadow="never" class="upstream-card">
           <template #header>
             <div class="card-header">
-              <el-icon class="card-icon"><Connection /></el-icon>
-              <span>上游服务器</span>
+              <span class="header-title">上游服务器状态 ({{ currentStats.healthy_upstreams || 0 }}/{{ currentStats.total_upstreams || 0 }})</span>
             </div>
           </template>
-          <div class="detail-list">
-            <div class="detail-item">
-              <span class="label">服务器总数</span>
-              <span class="value">{{ stats.upstreams?.total || 0 }}</span>
-            </div>
-            <div class="detail-item">
-              <span class="label">健康服务器</span>
-              <span class="value success">{{ stats.upstreams?.healthy || 0 }}</span>
-            </div>
-            <div class="detail-item">
-              <span class="label">查询策略</span>
-              <el-tag type="primary" effect="plain" size="small">{{ strategyName }}</el-tag>
-            </div>
-          </div>
-        </el-card>
-      </el-col>
-      <el-col :xs="24" :md="12">
-        <el-card class="detail-card" shadow="never">
-          <template #header>
-            <div class="card-header">
-              <el-icon class="card-icon"><Calendar /></el-icon>
-              <span>今日统计</span>
-            </div>
-          </template>
-          <div class="detail-list">
-            <div class="detail-item">
-              <span class="label">今日查询</span>
-              <span class="value">{{ stats.query?.queries_today || 0 }}</span>
-            </div>
-            <div class="detail-item">
-              <span class="label">缓存命中</span>
-              <span class="value success">{{ stats.query?.cache_hits || 0 }}</span>
-            </div>
-            <div class="detail-item">
-              <span class="label">缓存上限</span>
-              <span class="value">{{ stats.cache?.max_entries || 0 }}</span>
+          <div class="upstream-grid">
+            <div 
+              v-for="upstream in currentStats.upstream_status || []" 
+              :key="upstream.id"
+              class="upstream-item"
+              :class="{ 'is-healthy': upstream.healthy, 'is-down': !upstream.healthy }"
+            >
+              <div class="upstream-status-dot"></div>
+              <div class="upstream-info">
+                <div class="upstream-name">{{ upstream.name }}</div>
+                <div class="upstream-meta">
+                  <span class="latency" v-if="upstream.healthy">{{ upstream.latency_ms }}ms</span>
+                  <span class="status-text" v-else>Down</span>
+                </div>
+              </div>
             </div>
           </div>
         </el-card>
       </el-col>
     </el-row>
-
-    <!-- 快捷操作 -->
-    <el-card class="quick-actions" shadow="never">
-      <template #header>
-        <div class="card-header">
-          <el-icon class="card-icon"><Operation /></el-icon>
-          <span>快捷操作</span>
-        </div>
-      </template>
-      <el-row :gutter="16">
-        <el-col :xs="12" :sm="6">
-          <router-link to="/records" class="action-btn">
-            <el-icon><Document /></el-icon>
-            <span>DNS 记录</span>
-          </router-link>
-        </el-col>
-        <el-col :xs="12" :sm="6">
-          <router-link to="/upstreams" class="action-btn">
-            <el-icon><Connection /></el-icon>
-            <span>上游服务器</span>
-          </router-link>
-        </el-col>
-        <el-col :xs="12" :sm="6">
-          <router-link to="/cache" class="action-btn">
-            <el-icon><Coin /></el-icon>
-            <span>缓存管理</span>
-          </router-link>
-        </el-col>
-        <el-col :xs="12" :sm="6">
-          <router-link to="/logs" class="action-btn">
-            <el-icon><List /></el-icon>
-            <span>查询日志</span>
-          </router-link>
-        </el-col>
-      </el-row>
-    </el-card>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, onMounted, onUnmounted, computed } from 'vue'
 import { 
-  CircleCheck, CircleClose, DataAnalysis, TrendCharts, Coin, Timer,
-  Connection, Calendar, Operation, Document, List
+  CircleCheck, CircleClose, DataAnalysis, TrendCharts, Odometer, Stopwatch
 } from '@element-plus/icons-vue'
-import api from '../api'
+import { use } from 'echarts/core'
+import { CanvasRenderer } from 'echarts/renderers'
+import { LineChart } from 'echarts/charts'
+import {
+  TitleComponent,
+  TooltipComponent,
+  LegendComponent,
+  GridComponent
+} from 'echarts/components'
+import VChart from 'vue-echarts'
 
-interface Stats {
-  status?: string
-  uptime_seconds?: number
-  cache?: {
-    entries: number
-    hits: number
-    misses: number
-    hit_rate: number
-    default_ttl: number
-    max_entries: number
-  }
-  query?: {
-    total_queries: number
-    cache_hits: number
-    queries_today: number
-  }
-  upstreams?: {
-    total: number
-    healthy: number
-  }
-  strategy?: string
+import TopDomainsCard from './dashboard/TopDomainsCard.vue'
+import TopClientsCard from './dashboard/TopClientsCard.vue'
+
+// 注册 ECharts 组件
+use([
+  CanvasRenderer,
+  LineChart,
+  TitleComponent,
+  TooltipComponent,
+  LegendComponent,
+  GridComponent
+])
+
+// 统计数据接口
+interface UpstreamStatus {
+  id: number
+  name: string
+  healthy: boolean
+  latency_ms: number
 }
 
-const stats = ref<Stats>({})
-let refreshInterval: ReturnType<typeof setInterval> | null = null
-
-const strategyName = computed(() => {
-  const names: Record<string, string> = {
-    'concurrent': '并发查询',
-    'round_robin': '轮询',
-    'random': '随机',
-    'fastest': '最快响应'
-  }
-  return names[stats.value.strategy || ''] || stats.value.strategy || '-'
-})
-
-function formatUptime(seconds: number): string {
-  const days = Math.floor(seconds / 86400)
-  const hours = Math.floor((seconds % 86400) / 3600)
-  const minutes = Math.floor((seconds % 3600) / 60)
-  
-  if (days > 0) return `${days}天${hours}时`
-  if (hours > 0) return `${hours}时${minutes}分`
-  return `${minutes}分钟`
+interface StatsMessage {
+  timestamp: number
+  qps: number
+  avg_latency_ms: number
+  cache_hit_rate: number
+  total_queries: number
+  healthy_upstreams: number
+  total_upstreams: number
+  upstream_status: UpstreamStatus[]
 }
 
-async function fetchStats() {
-  try {
-    const response = await api.get('/api/status')
-    stats.value = response.data
-  } catch {
-    // Handle error silently
+const isConnected = ref(false)
+const currentStats = ref<Partial<StatsMessage>>({})
+const timeData = ref<string[]>([])
+const qpsData = ref<number[]>([])
+const latencyData = ref<number[]>([])
+
+let eventSource: EventSource | null = null
+
+// 图表配置
+const chartOption = computed(() => ({
+  tooltip: {
+    trigger: 'axis',
+    axisPointer: {
+      type: 'cross'
+    }
+  },
+  legend: {
+    data: ['QPS', 'Latency (ms)']
+  },
+  grid: {
+    left: '3%',
+    right: '4%',
+    bottom: '3%',
+    containLabel: true
+  },
+  xAxis: {
+    type: 'category',
+    boundaryGap: false,
+    data: timeData.value
+  },
+  yAxis: [
+    {
+      type: 'value',
+      name: 'QPS',
+      position: 'left',
+      splitLine: {
+        show: true,
+        lineStyle: {
+          type: 'dashed'
+        }
+      }
+    },
+    {
+      type: 'value',
+      name: 'Latency',
+      position: 'right',
+      splitLine: {
+        show: false
+      }
+    }
+  ],
+  series: [
+    {
+      name: 'QPS',
+      type: 'line',
+      smooth: true,
+      showSymbol: false,
+      areaStyle: {
+        opacity: 0.1,
+        color: '#11998e'
+      },
+      itemStyle: {
+        color: '#11998e'
+      },
+      data: qpsData.value
+    },
+    {
+      name: 'Latency (ms)',
+      type: 'line',
+      yAxisIndex: 1,
+      smooth: true,
+      showSymbol: false,
+      itemStyle: {
+        color: '#f5576c'
+      },
+      data: latencyData.value
+    }
+  ]
+}))
+
+const MAX_POINTS = 60 // 保留最近 60 秒的数据
+
+function connectSSE() {
+  // 注意：在开发和生产环境中 URL 可能不同，这里假设 API 路径是相对的
+  const token = localStorage.getItem('token')
+  const url = `/api/stats/stream?token=${encodeURIComponent(token || '')}`
+  eventSource = new EventSource(url)
+
+  eventSource.onopen = () => {
+    isConnected.value = true
+  }
+
+  eventSource.onmessage = (event) => {
+    try {
+      const data: StatsMessage = JSON.parse(event.data)
+      currentStats.value = data
+
+      // 更新图表数据
+      const now = new Date()
+      const timeStr = `${now.getHours()}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`
+
+      timeData.value.push(timeStr)
+      qpsData.value.push(data.qps)
+      latencyData.value.push(data.avg_latency_ms)
+
+      // 限制数据点数量
+      if (timeData.value.length > MAX_POINTS) {
+        timeData.value.shift()
+        qpsData.value.shift()
+        latencyData.value.shift()
+      }
+    } catch (e) {
+      console.error('Failed to parse SSE stats:', e)
+    }
+  }
+
+  eventSource.onerror = () => {
+    isConnected.value = false
+    eventSource?.close()
+    // 5秒后重连
+    setTimeout(connectSSE, 5000)
   }
 }
 
 onMounted(() => {
-  fetchStats()
-  refreshInterval = setInterval(fetchStats, 30000)
+  connectSSE()
 })
 
 onUnmounted(() => {
-  if (refreshInterval) clearInterval(refreshInterval)
+  if (eventSource) {
+    eventSource.close()
+  }
 })
 </script>
 
@@ -231,32 +309,26 @@ onUnmounted(() => {
   margin: 0 auto;
 }
 
-/* 页面标题 */
 .page-header {
   display: flex;
   justify-content: space-between;
-  align-items: flex-start;
+  align-items: center;
   margin-bottom: 24px;
 }
 
 .header-left h1 {
-  margin: 0 0 8px 0;
+  margin: 0;
   font-size: 24px;
   font-weight: 600;
   color: #303133;
 }
 
 .subtitle {
-  margin: 0;
+  margin: 4px 0 0 0;
   font-size: 14px;
   color: #909399;
 }
 
-.status-icon {
-  margin-right: 4px;
-}
-
-/* 统计卡片 */
 .stats-row {
   margin-bottom: 24px;
 }
@@ -269,12 +341,8 @@ onUnmounted(() => {
   align-items: center;
   gap: 16px;
   box-shadow: 0 2px 12px rgba(0, 0, 0, 0.04);
-  transition: transform 0.3s, box-shadow 0.3s;
-}
-
-.stat-card:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
+  transition: transform 0.3s;
+  height: 100%;
 }
 
 .stat-icon {
@@ -286,6 +354,7 @@ onUnmounted(() => {
   justify-content: center;
   color: #fff;
   font-size: 28px;
+  flex-shrink: 0;
 }
 
 .stat-info {
@@ -294,9 +363,15 @@ onUnmounted(() => {
 }
 
 .stat-value {
-  font-size: 28px;
+  font-size: 24px;
   font-weight: 600;
   color: #303133;
+}
+
+.stat-value small {
+  font-size: 14px;
+  margin-left: 4px;
+  color: #909399;
 }
 
 .stat-label {
@@ -305,118 +380,91 @@ onUnmounted(() => {
   margin-top: 4px;
 }
 
-/* 详细信息卡片 */
-.detail-row {
+.chart-card {
+  border-radius: 12px;
+  border: none;
   margin-bottom: 24px;
 }
 
-.detail-card {
-  border-radius: 12px;
-  border: none;
-  height: 100%;
+.rank-row {
+  margin-bottom: 24px;
 }
 
-.card-header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
+.chart-container {
+  height: 350px;
+  width: 100%;
+}
+
+.chart {
+  height: 100%;
+  width: 100%;
+}
+
+.upstream-card {
+  border-radius: 12px;
+  border: none;
+}
+
+.header-title {
   font-weight: 600;
+  font-size: 16px;
   color: #303133;
 }
 
-.card-icon {
-  font-size: 18px;
-  color: #667eea;
-}
-
-.detail-list {
-  display: flex;
-  flex-direction: column;
+.upstream-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
   gap: 16px;
 }
 
-.detail-item {
+.upstream-item {
   display: flex;
-  justify-content: space-between;
   align-items: center;
-  padding-bottom: 16px;
-  border-bottom: 1px solid #f0f0f0;
-}
-
-.detail-item:last-child {
-  padding-bottom: 0;
-  border-bottom: none;
-}
-
-.detail-item .label {
-  color: #909399;
-  font-size: 14px;
-}
-
-.detail-item .value {
-  font-weight: 600;
-  color: #303133;
-  font-size: 16px;
-}
-
-.detail-item .value.success {
-  color: #67C23A;
-}
-
-/* 快捷操作 */
-.quick-actions {
-  border-radius: 12px;
-  border: none;
-}
-
-.action-btn {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  padding: 24px 16px;
+  gap: 12px;
+  padding: 12px;
   background: #f8f9fa;
-  border-radius: 12px;
-  text-decoration: none;
-  color: #606266;
-  transition: all 0.3s;
+  border-radius: 8px;
+  border: 1px solid #ebeef5;
 }
 
-.action-btn:hover {
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-  color: #fff;
-  transform: translateY(-2px);
+.upstream-item.is-healthy {
+  border-left: 4px solid #67C23A;
 }
 
-.action-btn .el-icon {
-  font-size: 28px;
+.upstream-item.is-down {
+  border-left: 4px solid #F56C6C;
 }
 
-.action-btn span {
-  font-size: 14px;
+.upstream-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.is-healthy .upstream-status-dot {
+  background-color: #67C23A;
+  box-shadow: 0 0 8px rgba(103, 194, 58, 0.4);
+}
+
+.is-down .upstream-status-dot {
+  background-color: #F56C6C;
+  box-shadow: 0 0 8px rgba(245, 108, 108, 0.4);
+}
+
+.upstream-name {
   font-weight: 500;
+  font-size: 14px;
+  color: #303133;
 }
 
-/* 响应式 */
+.upstream-meta {
+  font-size: 12px;
+  color: #909399;
+}
+
 @media (max-width: 768px) {
-  .page-header {
-    flex-direction: column;
-    gap: 16px;
-  }
-  
   .stat-card {
-    padding: 16px;
-  }
-  
-  .stat-value {
-    font-size: 22px;
-  }
-  
-  .stat-icon {
-    width: 48px;
-    height: 48px;
-    font-size: 24px;
+    margin-bottom: 16px;
   }
 }
 </style>

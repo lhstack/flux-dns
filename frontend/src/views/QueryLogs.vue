@@ -123,6 +123,19 @@
             <el-option label="未命中" :value="false" />
           </el-select>
         </div>
+        <div class="filter-item" style="min-width: 320px;">
+          <label>时间范围</label>
+          <el-date-picker
+            v-model="filters.dateRange"
+            type="datetimerange"
+            range-separator="至"
+            start-placeholder="开始时间"
+            end-placeholder="结束时间"
+            :shortcuts="shortcuts"
+            size="large"
+            @change="fetchLogs"
+          />
+        </div>
         <div class="filter-actions">
           <el-button type="primary" @click="fetchLogs" size="large">
             <el-icon><Search /></el-icon>
@@ -132,6 +145,20 @@
             <el-icon><RefreshRight /></el-icon>
             重置
           </el-button>
+          
+          <el-dropdown @command="handleExport" trigger="click">
+            <el-button type="success" size="large">
+              <el-icon><Download /></el-icon>
+              导出
+              <el-icon class="el-icon--right"><ArrowDown /></el-icon>
+            </el-button>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item command="csv">导出 CSV</el-dropdown-item>
+                <el-dropdown-item command="json">导出 JSON</el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
         </div>
       </div>
     </el-card>
@@ -211,7 +238,7 @@ import { ref, reactive, onMounted, computed } from 'vue'
 import { ElMessage } from 'element-plus'
 import { 
   Refresh, DataAnalysis, Calendar, CircleCheck, TrendCharts,
-  Search, Monitor, RefreshRight 
+  Search, Monitor, RefreshRight, Download, ArrowDown
 } from '@element-plus/icons-vue'
 import api from '../api'
 
@@ -253,7 +280,8 @@ const filters = reactive({
   query_name: '',
   query_type: null as string | null,
   client_ip: '',
-  cache_hit: null as boolean | null
+  cache_hit: null as boolean | null,
+  dateRange: null as [Date, Date] | null
 })
 
 const offset = computed(() => (currentPage.value - 1) * pageSize.value)
@@ -289,6 +317,10 @@ async function fetchLogs() {
     if (filters.query_type) params.query_type = filters.query_type
     if (filters.client_ip) params.client_ip = filters.client_ip
     if (filters.cache_hit !== null) params.cache_hit = filters.cache_hit
+    if (filters.dateRange) {
+      params.start_time = filters.dateRange[0].toISOString()
+      params.end_time = filters.dateRange[1].toISOString()
+    }
 
     const response = await api.get('/api/logs', { params })
     logs.value = response.data.data
@@ -299,6 +331,61 @@ async function fetchLogs() {
     loading.value = false
   }
 }
+
+function handleExport(format: string) {
+  const params: string[] = []
+  if (filters.query_name) params.push(`query_name=${encodeURIComponent(filters.query_name)}`)
+  if (filters.query_type) params.push(`query_type=${encodeURIComponent(filters.query_type)}`)
+  if (filters.client_ip) params.push(`client_ip=${encodeURIComponent(filters.client_ip)}`)
+  if (filters.cache_hit !== null) params.push(`cache_hit=${filters.cache_hit}`)
+  if (filters.dateRange) {
+    params.push(`start_time=${encodeURIComponent(filters.dateRange[0].toISOString())}`)
+    params.push(`end_time=${encodeURIComponent(filters.dateRange[1].toISOString())}`)
+  }
+  params.push(`format=${format}`)
+  
+  // Add auth token
+  const token = localStorage.getItem('token')
+  if (token) {
+    params.push(`token=${token}`)
+  }
+  
+  // Use window.open to trigger download
+  const queryString = params.length > 0 ? `?${params.join('&')}` : ''
+  // Assuming API base URL is handled by proxy or same origin, but for direct download link we might need full path if not using axios
+  // Here we assume /api is proxied
+  window.open(`/api/logs/export${queryString}`, '_blank')
+}
+
+const shortcuts = [
+  {
+    text: '最近1小时',
+    value: () => {
+      const end = new Date()
+      const start = new Date()
+      start.setTime(start.getTime() - 3600 * 1000)
+      return [start, end]
+    },
+  },
+  {
+    text: '最近24小时',
+    value: () => {
+      const end = new Date()
+      const start = new Date()
+      start.setTime(start.getTime() - 3600 * 1000 * 24)
+      return [start, end]
+    },
+  },
+  {
+    text: '最近7天',
+    value: () => {
+      const end = new Date()
+      const start = new Date()
+      start.setTime(start.getTime() - 3600 * 1000 * 24 * 7)
+      return [start, end]
+    },
+  },
+]
 
 async function fetchStats() {
   try {
@@ -314,6 +401,7 @@ function resetFilters() {
   filters.query_type = null
   filters.client_ip = ''
   filters.cache_hit = null
+  filters.dateRange = null
   currentPage.value = 1
   fetchLogs()
 }

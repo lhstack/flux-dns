@@ -253,7 +253,11 @@
       </el-col>
     </el-row>
 
+    <!-- 告警与状态 -->
     <el-row :gutter="20" style="margin-top: 20px;" class="equal-height-row">
+      <el-col :xs="24" :md="12">
+        <AlertSettingsCard />
+      </el-col>
       <!-- 系统状态 -->
       <el-col :xs="24" :md="12">
         <el-card class="status-card" shadow="never">
@@ -302,9 +306,11 @@
           </div>
         </el-card>
       </el-col>
+    </el-row>
 
+    <el-row :gutter="20" style="margin-top: 20px;">
       <!-- 健康检查 -->
-      <el-col :xs="24" :md="12">
+      <el-col :span="24">
         <el-card class="health-card" shadow="never">
           <template #header>
             <div class="card-header">
@@ -382,6 +388,7 @@ import {
   Delete, DeleteFilled, InfoFilled
 } from '@element-plus/icons-vue'
 import api from '../api'
+import AlertSettingsCard from './dashboard/AlertSettingsCard.vue'
 
 interface Strategy {
   strategy: string
@@ -875,11 +882,15 @@ onMounted(() => {
 
 /* 状态卡片内容布局 */
 .status-content {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
   gap: 16px;
-  justify-content: space-between;
+}
+
+@media (max-width: 768px) {
+  .status-content {
+    grid-template-columns: 1fr;
+  }
 }
 
 /* 健康检查卡片内容布局 */
@@ -890,11 +901,21 @@ onMounted(() => {
 }
 
 .health-list {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+}
+
+@media (max-width: 1200px) {
+  .health-list {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (max-width: 768px) {
+  .health-list {
+    grid-template-columns: 1fr;
+  }
 }
 
 .card-header {

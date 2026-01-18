@@ -31,8 +31,11 @@ pub struct LogsQueryParams {
     pub query_type: Option<String>,
     pub client_ip: Option<String>,
     pub cache_hit: Option<bool>,
+    pub start_time: Option<String>,
+    pub end_time: Option<String>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
+    pub format: Option<String>,
 }
 
 impl From<LogsQueryParams> for QueryLogFilter {
@@ -42,6 +45,8 @@ impl From<LogsQueryParams> for QueryLogFilter {
             query_type: params.query_type,
             client_ip: params.client_ip,
             cache_hit: params.cache_hit,
+            start_time: params.start_time.and_then(|t| chrono::DateTime::parse_from_rfc3339(&t).ok().map(|dt| dt.with_timezone(&chrono::Utc))),
+            end_time: params.end_time.and_then(|t| chrono::DateTime::parse_from_rfc3339(&t).ok().map(|dt| dt.with_timezone(&chrono::Utc))),
             limit: params.limit,
             offset: params.offset,
         }
@@ -217,6 +222,58 @@ pub async fn cleanup_all_logs(
     })))
 }
 
+/// Export logs
+///
+/// GET /api/logs/export
+pub async fn export_logs(
+    State(state): State<LogsState>,
+    Query(params): Query<LogsQueryParams>,
+) -> Result<impl IntoResponse, ApiError> {
+    let repo = state.db.query_logs();
+    // Increase limit for export, or set to a large number
+    let mut filter = QueryLogFilter::from(params.clone());
+    filter.limit = Some(10000); // Limit export to 10k rows for now to prevent OOM
+    filter.offset = Some(0);
+
+    let result = repo.list(filter).await.map_err(|e| ApiError {
+        code: "INTERNAL_ERROR".to_string(),
+        message: format!("Failed to list logs for export: {}", e),
+        details: None,
+    })?;
+
+    let format = params.format.unwrap_or_else(|| "csv".to_string());
+
+    if format.to_lowercase() == "json" {
+        return Ok(Json(result.items).into_response());
+    }
+
+    // Default to CSV
+    let mut csv = String::new();
+    csv.push_str("Time,Client IP,Domain,Type,Response Code,Response Time(ms),Cache Hit,Upstream\n");
+
+    for log in result.items {
+        csv.push_str(&format!(
+            "{},{},{},{},{},{},{},{}\n",
+            log.created_at.to_rfc3339(),
+            log.client_ip,
+            log.query_name,
+            log.query_type,
+            log.response_code.unwrap_or_default(),
+            log.response_time.unwrap_or(0),
+            log.cache_hit,
+            log.upstream_used.unwrap_or_default()
+        ));
+    }
+
+    Ok((
+        [
+            (axum::http::header::CONTENT_TYPE, "text/csv"),
+            (axum::http::header::CONTENT_DISPOSITION, "attachment; filename=\"query_logs.csv\""),
+        ],
+        csv
+    ).into_response())
+}
+
 /// Get log retention settings
 ///
 /// GET /api/logs/retention
@@ -307,6 +364,7 @@ pub fn logs_router(state: LogsState) -> axum::Router {
 
     axum::Router::new()
         .route("/", get(list_logs))
+        .route("/export", get(export_logs))
         .route("/stats", get(get_stats))
         .route("/cleanup", delete(cleanup_logs))
         .route("/cleanup/before", delete(cleanup_logs_before_date))

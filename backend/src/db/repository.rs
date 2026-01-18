@@ -555,106 +555,74 @@ impl QueryLogRepository {
         let limit = filter.limit.unwrap_or(50).min(1000);
         let offset = filter.offset.unwrap_or(0);
 
-        // For simplicity, we'll use separate queries based on filter combinations
-        // This avoids complex dynamic query building with sqlx
-        
-        let (items, total) = if let Some(ref name) = filter.query_name {
+        let mut query_builder = sqlx::QueryBuilder::new("SELECT * FROM query_logs WHERE 1=1");
+        let mut count_builder = sqlx::QueryBuilder::new("SELECT COUNT(*) FROM query_logs WHERE 1=1");
+
+        if let Some(ref name) = filter.query_name {
             let pattern = format!("%{}%", name);
-            let count: (i64,) = sqlx::query_as(
-                "SELECT COUNT(*) FROM query_logs WHERE query_name LIKE ?"
-            )
-            .bind(&pattern)
-            .fetch_one(&self.pool)
-            .await?;
-            
-            let items = sqlx::query_as::<_, QueryLog>(
-                "SELECT * FROM query_logs WHERE query_name LIKE ? ORDER BY created_at DESC LIMIT ? OFFSET ?"
-            )
-            .bind(&pattern)
-            .bind(limit)
-            .bind(offset)
-            .fetch_all(&self.pool)
-            .await?;
-            
-            (items, count.0)
-        } else if let Some(ref qtype) = filter.query_type {
-            let count: (i64,) = sqlx::query_as(
-                "SELECT COUNT(*) FROM query_logs WHERE query_type = ?"
-            )
-            .bind(qtype)
-            .fetch_one(&self.pool)
-            .await?;
-            
-            let items = sqlx::query_as::<_, QueryLog>(
-                "SELECT * FROM query_logs WHERE query_type = ? ORDER BY created_at DESC LIMIT ? OFFSET ?"
-            )
-            .bind(qtype)
-            .bind(limit)
-            .bind(offset)
-            .fetch_all(&self.pool)
-            .await?;
-            
-            (items, count.0)
-        } else if let Some(ref ip) = filter.client_ip {
-            let count: (i64,) = sqlx::query_as(
-                "SELECT COUNT(*) FROM query_logs WHERE client_ip = ?"
-            )
-            .bind(ip)
-            .fetch_one(&self.pool)
-            .await?;
-            
-            let items = sqlx::query_as::<_, QueryLog>(
-                "SELECT * FROM query_logs WHERE client_ip = ? ORDER BY created_at DESC LIMIT ? OFFSET ?"
-            )
-            .bind(ip)
-            .bind(limit)
-            .bind(offset)
-            .fetch_all(&self.pool)
-            .await?;
-            
-            (items, count.0)
-        } else if let Some(cache_hit) = filter.cache_hit {
-            let count: (i64,) = sqlx::query_as(
-                "SELECT COUNT(*) FROM query_logs WHERE cache_hit = ?"
-            )
-            .bind(cache_hit)
-            .fetch_one(&self.pool)
-            .await?;
-            
-            let items = sqlx::query_as::<_, QueryLog>(
-                "SELECT * FROM query_logs WHERE cache_hit = ? ORDER BY created_at DESC LIMIT ? OFFSET ?"
-            )
-            .bind(cache_hit)
-            .bind(limit)
-            .bind(offset)
-            .fetch_all(&self.pool)
-            .await?;
-            
-            (items, count.0)
-        } else {
-            // No filters - return all
-            let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM query_logs")
-                .fetch_one(&self.pool)
-                .await?;
-            
-            let items = sqlx::query_as::<_, QueryLog>(
-                "SELECT * FROM query_logs ORDER BY created_at DESC LIMIT ? OFFSET ?"
-            )
-            .bind(limit)
-            .bind(offset)
-            .fetch_all(&self.pool)
-            .await?;
-            
-            (items, count.0)
-        };
+            query_builder.push(" AND query_name LIKE ");
+            query_builder.push_bind(pattern.clone());
+            count_builder.push(" AND query_name LIKE ");
+            count_builder.push_bind(pattern);
+        }
+
+        if let Some(ref qtype) = filter.query_type {
+            query_builder.push(" AND query_type = ");
+            query_builder.push_bind(qtype.clone());
+            count_builder.push(" AND query_type = ");
+            count_builder.push_bind(qtype);
+        }
+
+        if let Some(ref ip) = filter.client_ip {
+             let pattern = format!("%{}%", ip);
+             query_builder.push(" AND client_ip LIKE ");
+             query_builder.push_bind(pattern.clone());
+             count_builder.push(" AND client_ip LIKE ");
+             count_builder.push_bind(pattern);
+        }
+        
+        if let Some(cache_hit) = filter.cache_hit {
+            query_builder.push(" AND cache_hit = ");
+            query_builder.push_bind(cache_hit);
+            count_builder.push(" AND cache_hit = ");
+            count_builder.push_bind(cache_hit);
+        }
+
+        if let Some(ref start) = filter.start_time {
+            query_builder.push(" AND created_at >= ");
+            query_builder.push_bind(start);
+            count_builder.push(" AND created_at >= ");
+            count_builder.push_bind(start);
+        }
+
+        if let Some(ref end) = filter.end_time {
+            query_builder.push(" AND created_at <= ");
+            query_builder.push_bind(end);
+            count_builder.push(" AND created_at <= ");
+            count_builder.push_bind(end);
+        }
+
+        // Get count first
+        let count_query = count_builder.build_query_as::<(i64,)>();
+        let count = count_query.fetch_one(&self.pool).await?.0;
+
+        // Add sorting and pagination
+        query_builder.push(" ORDER BY created_at DESC LIMIT ");
+        query_builder.push_bind(limit);
+        query_builder.push(" OFFSET ");
+        query_builder.push_bind(offset);
+
+        let query = query_builder.build_query_as::<QueryLog>();
+        let items = query.fetch_all(&self.pool).await?;
 
         Ok(PaginatedResult {
             items,
-            total,
+            total: count,
             limit,
             offset,
         })
     }
+
 
     /// Delete old query logs (older than specified days)
     pub async fn delete_old(&self, days: i64) -> Result<u64> {
@@ -722,14 +690,58 @@ impl QueryLogRepository {
             queries_today: today.0,
         })
     }
+
+    /// Get top queried domains
+    pub async fn get_top_domains(&self, limit: i64) -> Result<Vec<TopStats>> {
+        let result = sqlx::query_as::<_, TopStats>(
+            r#"
+            SELECT query_name as name, COUNT(*) as count
+            FROM query_logs
+            GROUP BY query_name
+            ORDER BY count DESC
+            LIMIT ?
+            "#,
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(result)
+    }
+
+    /// Get top client IPs
+    pub async fn get_top_clients(&self, limit: i64) -> Result<Vec<TopStats>> {
+        let result = sqlx::query_as::<_, TopStats>(
+            r#"
+            SELECT client_ip as name, COUNT(*) as count
+            FROM query_logs
+            GROUP BY client_ip
+            ORDER BY count DESC
+            LIMIT ?
+            "#,
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(result)
+    }
 }
 
+
 /// Query statistics
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct QueryStats {
     pub total_queries: i64,
     pub cache_hits: i64,
     pub queries_today: i64,
+}
+
+/// Statistics for Top N items (domains, clients)
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct TopStats {
+    pub name: String,
+    pub count: i64,
 }
 
 

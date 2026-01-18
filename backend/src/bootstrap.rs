@@ -15,14 +15,17 @@ use tracing::info;
 use crate::config::ConfigManager;
 use crate::db::Database;
 use crate::dns::{CacheConfig, CacheManager, DnsResolver, ProxyManager, RewriteEngine, UpstreamManager};
-use crate::dns::server::{DohDnsServer, UdpDnsServer};
+use crate::dns::server::DohDnsServer;
 use crate::log::{LogConfig, LogManager};
 use crate::state::AppState;
+use crate::services::alert_manager::AlertManager;
+use crate::services::listener_manager::ListenerManager;
 use crate::web::{
     auth_middleware, cache_router, dns_query_router, fallback_handler, index_handler,
     logs_router, records_router, rewrite_router, settings_router, static_handler, status_router,
-    strategy_router, upstreams_router, AuthService, AuthState, CacheState, DnsQueryState,
+    strategy_router, upstreams_router, stats_router, AuthService, AuthState, CacheState, DnsQueryState,
     LogsState, RecordsState, RewriteState, SettingsState, StatusState, StrategyState, UpstreamsState,
+    StatsState,
 };
 
 pub async fn run() -> Result<()> {
@@ -94,6 +97,9 @@ pub async fn run() -> Result<()> {
     ));
     info!("DNS resolver initialized");
 
+    // Initialize ListenerManager
+    let listener_manager = Arc::new(ListenerManager::new(db.clone(), resolver.clone()));
+
     // Create application state
     let _state = Arc::new(AppState {
         config: config.clone(),
@@ -104,6 +110,7 @@ pub async fn run() -> Result<()> {
         proxy: proxy.clone(),
         rewrite_engine: rewrite_engine.clone(),
         upstream_manager: upstream_manager.clone(),
+        listener_manager: listener_manager.clone(),
     });
 
     // Perform initial log cleanup
@@ -163,35 +170,8 @@ pub async fn run() -> Result<()> {
         }
     }));
 
-    // Load enabled listeners from database
-    let listeners = db.server_listeners().list_enabled().await?;
-    
-    for listener in &listeners {
-        match listener.protocol.as_str() {
-            "udp" => {
-                let udp_addr: SocketAddr = format!("{}:{}", listener.bind_address, listener.port).parse()?;
-                let udp_resolver = resolver.clone();
-                handles.push(tokio::spawn(async move {
-                    match UdpDnsServer::new(udp_addr, udp_resolver).await {
-                        Ok(server) => {
-                            info!("UDP DNS server listening on {}", udp_addr);
-                            let server = Arc::new(server);
-                            if let Err(e) = server.run().await {
-                                tracing::error!("UDP DNS server error: {}", e);
-                            }
-                        }
-                        Err(e) => {
-                            tracing::error!("Failed to start UDP DNS server: {}", e);
-                        }
-                    }
-                }));
-            }
-            // DoT, DoH, DoQ servers would be started here when TLS is configured
-            _ => {
-                info!("Listener {} configured but not yet implemented in startup", listener.protocol);
-            }
-        }
-    }
+    // Start enabled listeners using manager
+    listener_manager.start_all_enabled().await;
 
     // Start DoH DNS server (integrated with web server)
     let doh_server = DohDnsServer::new(resolver.clone());
@@ -233,11 +213,19 @@ pub async fn run() -> Result<()> {
     });
     let listeners_routes = crate::web::listeners_router(crate::web::ListenersState {
         db: db.clone(),
+        listener_manager: listener_manager.clone(),
     });
     let settings_routes = settings_router(SettingsState {
         db: db.clone(),
     });
     let doh_routes = doh_server.router();
+    
+    // Stats API routes
+    let stats_routes = stats_router(StatsState {
+        db: db.clone(),
+        cache: cache.clone(),
+        upstream_manager: upstream_manager.clone(),
+    });
     
     // LLM API routes
     let app_state = Arc::new(AppState {
@@ -249,10 +237,15 @@ pub async fn run() -> Result<()> {
         proxy: proxy.clone(),
         rewrite_engine: rewrite_engine.clone(),
         upstream_manager: upstream_manager.clone(),
+        listener_manager: listener_manager.clone(),
     });
     let llm_routes = crate::web::llm_router().with_state(crate::web::LlmState {
         app_state: app_state.clone(),
     });
+
+    // Start AlertManager
+    let alert_manager = Arc::new(AlertManager::new(app_state.clone()));
+    alert_manager.start().await;
 
     // Create protected API router (requires authentication)
     let protected_api = Router::new()
@@ -267,6 +260,7 @@ pub async fn run() -> Result<()> {
         .nest("/api/listeners", listeners_routes)
         .nest("/api/settings", settings_routes)
         .nest("/api/llm", llm_routes)
+        .nest("/api/stats", stats_routes)
         .layer(middleware::from_fn_with_state(auth_state.clone(), auth_middleware));
 
 
@@ -312,10 +306,7 @@ pub async fn run() -> Result<()> {
     println!("  - Web UI: http://0.0.0.0:{}", app_config.web_port);
     println!("  - DoH: http://0.0.0.0:{}/dns-query", app_config.web_port);
     
-    // Log enabled listeners
-    for listener in &listeners {
-        println!("  - {}: {}:{}", listener.protocol.to_uppercase(), listener.bind_address, listener.port);
-    }
+
 
     // Wait for shutdown signal
     shutdown_signal().await;

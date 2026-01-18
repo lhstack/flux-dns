@@ -3,7 +3,7 @@
 //! Handles SQLite database connections, migrations, and CRUD operations.
 
 mod models;
-mod repository;
+pub mod repository;
 
 pub use models::*;
 pub use repository::*;

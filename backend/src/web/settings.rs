@@ -25,6 +25,10 @@ pub struct SettingsState {
 pub struct SystemSettings {
     /// Disabled record types (e.g., ["AAAA"] to disable IPv6)
     pub disabled_record_types: Vec<String>,
+    /// Alert settings
+    pub alert_enabled: bool,
+    pub alert_webhook_url: Option<String>,
+    pub alert_latency_threshold_ms: i64,
 }
 
 /// Update settings request
@@ -32,6 +36,10 @@ pub struct SystemSettings {
 pub struct UpdateSettingsRequest {
     /// Disabled record types
     pub disabled_record_types: Option<Vec<String>>,
+    /// Alert settings
+    pub alert_enabled: Option<bool>,
+    pub alert_webhook_url: Option<String>,
+    pub alert_latency_threshold_ms: Option<i64>,
 }
 
 /// Config key for disabled record types
@@ -54,8 +62,23 @@ pub async fn get_settings(
         .map(|v| serde_json::from_str::<Vec<String>>(&v).unwrap_or_default())
         .unwrap_or_default();
 
+    let alert_enabled = repo.get("alert_enabled").await
+        .unwrap_or(None)
+        .unwrap_or_default() == "true";
+
+    let alert_webhook_url = repo.get("alert_webhook_url").await
+        .unwrap_or(None);
+
+    let alert_latency_threshold_ms = repo.get("alert_latency_threshold_ms").await
+        .unwrap_or(None)
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(200);
+
     Ok(Json(SystemSettings {
         disabled_record_types,
+        alert_enabled,
+        alert_webhook_url,
+        alert_latency_threshold_ms,
     }))
 }
 
@@ -95,6 +118,30 @@ pub async fn update_settings(
         })?;
     }
 
+    if let Some(enabled) = request.alert_enabled {
+        repo.set("alert_enabled", if enabled { "true" } else { "false" }).await.map_err(|e| ApiError {
+            code: "INTERNAL_ERROR".to_string(),
+            message: format!("Failed to save alert settings: {}", e),
+            details: None,
+        })?;
+    }
+
+    if let Some(url) = request.alert_webhook_url {
+        repo.set("alert_webhook_url", &url).await.map_err(|e| ApiError {
+            code: "INTERNAL_ERROR".to_string(),
+            message: format!("Failed to save alert settings: {}", e),
+            details: None,
+        })?;
+    }
+
+    if let Some(threshold) = request.alert_latency_threshold_ms {
+        repo.set("alert_latency_threshold_ms", &threshold.to_string()).await.map_err(|e| ApiError {
+            code: "INTERNAL_ERROR".to_string(),
+            message: format!("Failed to save alert settings: {}", e),
+            details: None,
+        })?;
+    }
+
     // Return updated settings
     get_settings(State(state)).await
 }
@@ -105,5 +152,55 @@ pub fn settings_router(state: SettingsState) -> axum::Router {
 
     axum::Router::new()
         .route("/", get(get_settings).put(update_settings))
+        .route("/test-alert", axum::routing::post(test_alert))
         .with_state(state)
+}
+
+/// Send a test alert
+///
+/// POST /api/settings/test-alert
+async fn test_alert(
+    State(state): State<SettingsState>,
+) -> Result<impl IntoResponse, ApiError> {
+    let repo = state.db.system_config();
+    
+    let webhook = repo.get("alert_webhook_url").await.map_err(|e| ApiError {
+        code: "INTERNAL_ERROR".to_string(),
+        message: format!("Failed to get webhook URL: {}", e),
+        details: None,
+    })?;
+
+    if let Some(url) = webhook {
+        if url.is_empty() {
+             return Err(ApiError {
+                code: "BAD_REQUEST".to_string(),
+                message: "Webhook URL is not configured".to_string(),
+                details: None,
+            });
+        }
+        
+        let client = reqwest::Client::new();
+        let payload = serde_json::json!({
+            "text": "🔔 **Test Alert**\n\nThis is a test notification from FluxDNS.",
+            "content": "Test notification from FluxDNS"
+        });
+
+        client.post(&url)
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| ApiError {
+                code: "INTERNAL_ERROR".to_string(),
+                message: format!("Failed to send test alert: {}", e),
+                details: None,
+            })?;
+            
+        Ok(Json(serde_json::json!({ "status": "ok" })))
+    } else {
+        Err(ApiError {
+            code: "BAD_REQUEST".to_string(),
+            message: "Webhook URL is not configured".to_string(),
+            details: None,
+        })
+    }
 }
