@@ -123,6 +123,55 @@ impl LlmClient {
         Ok(completion)
     }
 
+    /// Send a streaming chat request, returning a receiver for SSE events
+    pub async fn send_stream_request(
+        &self,
+        messages: Vec<ChatMessage>,
+    ) -> Result<reqwest::Response> {
+        let tools = self.function_registry.get_tool_definitions();
+        
+        let request = ChatCompletionRequest {
+            model: self.config.model.clone(),
+            messages,
+            tools: if tools.is_empty() { None } else { Some(tools) },
+            tool_choice: None,
+            temperature: Some(0.7),
+            max_tokens: Some(4096),
+            stream: Some(true), // Enable streaming
+        };
+
+        let url = format!("{}/chat/completions", self.config.api_base_url.trim_end_matches('/'));
+        
+        tracing::info!("Sending streaming LLM Request to: {}", url);
+        tracing::info!("Model: {}", &request.model);
+
+        let response = self.http_client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .header("Authorization", format!("Bearer {}", self.config.api_key))
+            .json(&request)
+            .send()
+            .await
+            .context("Failed to send streaming request to LLM API")?;
+
+        let status = response.status();
+        tracing::info!("Streaming LLM Response Status: {}", status);
+
+        if !status.is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            tracing::error!("LLM API Error Body: {}", error_text);
+            anyhow::bail!("LLM API error ({}): {}", status, error_text);
+        }
+
+        Ok(response)
+    }
+
+    /// Get the function registry for tool execution
+    #[allow(dead_code)]
+    pub fn function_registry(&self) -> &FunctionRegistry {
+        &self.function_registry
+    }
+
     /// Process a user message, handling function calls automatically
     pub async fn process_message(
         &self,

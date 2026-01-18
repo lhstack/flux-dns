@@ -38,6 +38,16 @@
             </div>
           </div>
           <div class="header-actions" @mousedown.stop>
+            <el-tooltip content="历史对话" placement="bottom" :show-after="500">
+              <div class="action-btn" @click="toggleSessionList">
+                <el-icon><Clock /></el-icon>
+              </div>
+            </el-tooltip>
+            <el-tooltip content="新对话" placement="bottom" :show-after="500">
+              <div class="action-btn" @click="createNewSession">
+                <el-icon><Plus /></el-icon>
+              </div>
+            </el-tooltip>
             <el-tooltip content="功能列表" placement="bottom" :show-after="500">
               <div class="action-btn" @click="toggleCapabilities">
                 <el-icon><Cpu /></el-icon>
@@ -211,17 +221,62 @@
           </div>
         </div>
       </Transition>
+
+      <!-- 会话历史列表 -->
+      <Transition name="capability-slide">
+        <div v-if="showSessionList" class="capabilities-overlay session-list-overlay">
+          <div class="overlay-header">
+            <div class="overlay-title">
+              <el-icon><Clock /></el-icon>
+              <span>历史对话</span>
+            </div>
+            <div class="close-overlay" @click="showSessionList = false">
+              <el-icon><ArrowRight /></el-icon>
+            </div>
+          </div>
+          <div class="overlay-content">
+            <div v-if="sessionLoading" class="capability-loading">
+              <el-icon class="is-loading"><Loading /></el-icon>
+              <span>正在加载对话...</span>
+            </div>
+            <div v-else-if="sessions.length === 0" class="capability-intro">
+              暂无历史对话，点击右上角 <el-icon><Plus /></el-icon> 开始新对话
+            </div>
+            <div v-else class="session-list">
+              <div 
+                v-for="session in sessions" 
+                :key="session.id" 
+                class="session-item"
+                :class="{ active: currentSessionId === session.id }"
+                @click="switchSession(session.id)"
+              >
+                <div class="session-info">
+                  <div class="session-title">{{ session.title }}</div>
+                  <div class="session-meta">
+                    {{ session.message_count }} 条消息 · {{ formatSessionTime(session.updated_at) }}
+                  </div>
+                </div>
+                <div class="session-actions" @click.stop>
+                  <el-icon class="session-delete" @click="deleteSession(session.id)">
+                    <Delete />
+                  </el-icon>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </Transition>
     </div>
   </Transition>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, nextTick } from 'vue'
+import { ref, computed, onMounted, nextTick, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import {
   ChatDotRound, Monitor, Delete, Close, MagicStick, User, Operation, 
   Promotion, InfoFilled, FullScreen, CopyDocument, ArrowDown, Cpu,
-  ArrowRight, Loading
+  ArrowRight, Loading, Clock, Plus
 } from '@element-plus/icons-vue'
 import api from '../api'
 
@@ -267,6 +322,19 @@ const activeQuickTab = ref('common')
 const showCapabilities = ref(false)
 const toolLoading = ref(false)
 const tools = ref<ToolDefinition[]>([])
+
+// 会话管理状态
+interface Session {
+  id: string
+  title: string
+  created_at: string
+  updated_at: string
+  message_count: number
+}
+const sessions = ref<Session[]>([])
+const currentSessionId = ref<string | null>(null)
+const showSessionList = ref(false)
+const sessionLoading = ref(false)
 
 // 拖拽相关
 const position = ref({ x: 0, y: 0 })
@@ -409,11 +477,49 @@ function startDrag(e: MouseEvent) {
   document.addEventListener('mouseup', onMouseUp)
 }
 
+// 监听会话 ID 变化并在本地存储中持久化
+watch(currentSessionId, (newId) => {
+  if (newId) {
+    localStorage.setItem('last_llm_session_id', newId)
+  } else {
+    localStorage.removeItem('last_llm_session_id')
+  }
+})
+
 async function checkConfiguration() {
+  const token = localStorage.getItem('token')
+  if (!token) {
+    isConfigured.value = false
+    return
+  }
+  
   try {
     const { data } = await api.get('/api/llm/config')
-    isConfigured.value = data.some((c: any) => c.enabled)
-  } catch {
+    const hasConfig = Array.isArray(data) && data.some((c: any) => c.enabled)
+    isConfigured.value = hasConfig
+    
+    if (hasConfig) {
+      // 如果没有加载过会话，加载一次
+      if (sessions.value.length === 0) {
+        await loadSessions()
+      }
+      
+      // 尝试恢复上次会话
+      if (!currentSessionId.value) {
+        const lastSessionId = localStorage.getItem('last_llm_session_id')
+        if (lastSessionId) {
+          // 确保 session 存在于列表中
+          const sessionExists = sessions.value.some(s => s.id === lastSessionId)
+          if (sessionExists) {
+             await switchSession(lastSessionId)
+          } else {
+            localStorage.removeItem('last_llm_session_id')
+          }
+        }
+      }
+    }
+  } catch (error) {
+    console.error('Failed to check LLM configuration:', error)
     isConfigured.value = false
   }
 }
@@ -463,25 +569,126 @@ async function sendMessage() {
   scrollToBottom()
   
   isLoading.value = true
+  
+  // Add placeholder for assistant message
+  const assistantIndex = messages.value.length
+  messages.value.push({
+    role: 'assistant',
+    content: '',
+    showDetails: false
+  })
+  
   try {
     const context = currentContext.value ? `当前用户Focus在"${currentContext.value}"页面。` : ''
-    const { data } = await api.post('/api/llm/chat', {
-      message: userMessage,
-      context
+    
+    // 如果没有当前会话，自动创建一个
+    if (!currentSessionId.value) {
+      try {
+        const { data } = await api.post('/api/llm/sessions', { title: '新对话' })
+        sessions.value.unshift(data)
+        currentSessionId.value = data.id
+        // 这里的 messages 不清空，保留用户刚发的消息
+      } catch (e) {
+        console.error('Failed to auto-create session:', e)
+      }
+    }
+
+    // Use fetch for streaming SSE
+    const response = await fetch('/api/llm/chat/stream', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${localStorage.getItem('token') || ''}`
+      },
+      body: JSON.stringify({
+        message: userMessage,
+        context,
+        session_id: currentSessionId.value
+      })
     })
     
-    messages.value.push({
-      role: 'assistant',
-      content: data.reply,
-      functionResults: data.functions_called?.length ? data.functions_called : undefined,
-      showDetails: false
-    })
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`)
+    }
+    
+    const reader = response.body?.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    
+    if (!reader) {
+      throw new Error('No response body')
+    }
+    
+    // Process streaming response
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      
+      buffer += decoder.decode(value, { stream: true })
+      
+      // Process complete SSE events
+      const lines = buffer.split('\n\n')
+      buffer = lines.pop() || '' // Keep incomplete line in buffer
+      
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          const data = line.slice(6)
+          try {
+            const event = JSON.parse(data)
+            
+            if (event.type === 'content') {
+              // Append content to message
+              const msg = messages.value[assistantIndex]
+              if (msg) msg.content += event.text
+              scrollToBottom()
+            } else if (event.type === 'reasoning') {
+              // Show reasoning in a collapsible section (optional)
+              // For now, we can skip or show as a subtle indicator
+            } else if (event.type === 'tool_call') {
+              // Show that a function is being called
+              const msg = messages.value[assistantIndex]
+              if (msg) {
+                msg.content += `\n\n🔧 **正在执行**: ${event.name}...`
+                // Initialize function results array if needed
+                if (!msg.functionResults) msg.functionResults = []
+              }
+              scrollToBottom()
+            } else if (event.type === 'tool_result') {
+              // Show function result
+              const msg = messages.value[assistantIndex]
+              if (msg && msg.functionResults) {
+                try {
+                  const resultData = JSON.parse(event.result)
+                  msg.functionResults.push({ name: event.name, data: resultData })
+                } catch {
+                  msg.functionResults.push({ name: event.name, data: event.result })
+                }
+              }
+              scrollToBottom()
+            } else if (event.type === 'done') {
+              // Streaming complete
+              break
+            } else if (event.type === 'error') {
+              const msg = messages.value[assistantIndex]
+              if (msg) msg.content = `❌ **错误**: ${event.message}`
+              break
+            }
+          } catch {
+            // Ignore parse errors for incomplete JSON
+          }
+        }
+      }
+    }
+    
+    // If no content was received, show error
+    const finalMsg = messages.value[assistantIndex]
+    if (finalMsg && !finalMsg.content) {
+      finalMsg.content = '❌ **错误**: 没有收到响应内容'
+    }
   } catch (error: any) {
-    const errorMsg = error.response?.data?.message || '连接服务失败，请检查后端日志。'
-    messages.value.push({
-      role: 'assistant',
-      content: `❌ **错误**: ${errorMsg}`
-    })
+    const errorMsg = error.message || '连接服务失败，请检查后端日志。'
+    const msg = messages.value[assistantIndex]
+    if (msg) msg.content = `❌ **错误**: ${errorMsg}`
   } finally {
     isLoading.value = false
     scrollToBottom()
@@ -493,8 +700,107 @@ function sendQuickMessage(message: string) {
   sendMessage()
 }
 
-function clearMessages() {
+async function clearMessages() {
+  if (currentSessionId.value) {
+    try {
+      await api.delete(`/api/llm/sessions/${currentSessionId.value}`)
+      sessions.value = sessions.value.filter(s => s.id !== currentSessionId.value)
+    } catch (e) {
+      console.error('Failed to delete session:', e)
+    }
+  }
   messages.value = []
+  currentSessionId.value = null
+  localStorage.removeItem('last_llm_session_id')
+}
+
+// ============================================================================
+// Session Management Functions
+// ============================================================================
+
+async function loadSessions() {
+  sessionLoading.value = true
+  try {
+    const { data } = await api.get('/api/llm/sessions')
+    sessions.value = data
+  } catch (e) {
+    console.error('Failed to load sessions:', e)
+  } finally {
+    sessionLoading.value = false
+  }
+}
+
+async function createNewSession() {
+  try {
+    const { data } = await api.post('/api/llm/sessions', { title: '新对话' })
+    sessions.value.unshift(data)
+    currentSessionId.value = data.id
+    messages.value = []
+  } catch (e) {
+    console.error('Failed to create session:', e)
+  }
+}
+
+async function switchSession(sessionId: string) {
+  showSessionList.value = false
+  if (currentSessionId.value === sessionId) return
+  
+  currentSessionId.value = sessionId
+  messages.value = []
+  
+  try {
+    const { data } = await api.get(`/api/llm/sessions/${sessionId}`)
+    messages.value = data.map((m: any) => ({
+      role: m.role as 'user' | 'assistant',
+      content: m.content || '',
+      functionResults: m.tool_results ? JSON.parse(m.tool_results) : undefined,
+      showDetails: false
+    }))
+    scrollToBottom()
+  } catch (e) {
+    console.error('Failed to load session messages:', e)
+  }
+  
+  showSessionList.value = false
+}
+
+async function deleteSession(sessionId: string) {
+  try {
+    await api.delete(`/api/llm/sessions/${sessionId}`)
+    sessions.value = sessions.value.filter(s => s.id !== sessionId)
+    if (currentSessionId.value === sessionId) {
+      currentSessionId.value = null
+      messages.value = []
+    }
+  } catch (e) {
+    console.error('Failed to delete session:', e)
+  }
+}
+
+function toggleSessionList() {
+  showSessionList.value = !showSessionList.value
+  if (showSessionList.value) {
+    loadSessions()
+  }
+}
+
+function formatSessionTime(dateStr: string): string {
+  try {
+    const date = new Date(dateStr)
+    const now = new Date()
+    const diffMs = now.getTime() - date.getTime()
+    const diffMins = Math.floor(diffMs / 60000)
+    const diffHours = Math.floor(diffMs / 3600000)
+    const diffDays = Math.floor(diffMs / 86400000)
+    
+    if (diffMins < 1) return '刚刚'
+    if (diffMins < 60) return `${diffMins} 分钟前`
+    if (diffHours < 24) return `${diffHours} 小时前`
+    if (diffDays < 7) return `${diffDays} 天前`
+    return date.toLocaleDateString('zh-CN')
+  } catch {
+    return dateStr
+  }
 }
 
 function toggleFunctionDetails(index: number) {
@@ -1239,5 +1545,81 @@ onMounted(() => {
     bottom: 20px;
     right: 20px;
   }
+}
+
+/* Session List Overlay */
+.session-list-overlay {
+  z-index: 15;
+}
+
+.session-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.session-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 12px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.session-item:hover {
+  background: rgba(102, 126, 234, 0.1);
+  border-color: rgba(102, 126, 234, 0.3);
+}
+
+.session-item.active {
+  background: rgba(102, 126, 234, 0.2);
+  border-color: rgba(102, 126, 234, 0.4);
+}
+
+.session-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.session-title {
+  font-size: 14px;
+  color: rgba(255, 255, 255, 0.9);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-bottom: 4px;
+}
+
+.session-meta {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.4);
+}
+
+.session-actions {
+  display: flex;
+  gap: 8px;
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+
+.session-item:hover .session-actions {
+  opacity: 1;
+}
+
+.session-delete {
+  color: rgba(255, 255, 255, 0.4);
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 4px;
+  transition: all 0.2s;
+}
+
+.session-delete:hover {
+  color: #ef4444;
+  background: rgba(239, 68, 68, 0.2);
 }
 </style>

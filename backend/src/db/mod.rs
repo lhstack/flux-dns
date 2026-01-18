@@ -262,7 +262,45 @@ impl Database {
         .execute(&self.pool)
         .await?;
 
-        // LLM conversation history table
+        // LLM sessions table (for conversation management)
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS llm_sessions (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        // LLM messages table (conversation messages)
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS llm_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                role VARCHAR(20) NOT NULL,
+                content TEXT,
+                tool_calls TEXT,
+                tool_results TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (session_id) REFERENCES llm_sessions(id) ON DELETE CASCADE
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"CREATE INDEX IF NOT EXISTS idx_llm_messages_session ON llm_messages(session_id)"#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        // Keep old table for backward compatibility, can be removed later
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS llm_conversations (

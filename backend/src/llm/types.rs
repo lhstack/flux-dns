@@ -132,6 +132,87 @@ pub struct Usage {
     pub total_tokens: u32,
 }
 
+// ============================================================================
+// Streaming Response Types (SSE)
+// ============================================================================
+
+/// Streaming chat completion chunk (OpenAI-compatible)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatCompletionChunk {
+    pub id: String,
+    pub object: String,
+    pub created: u64,
+    pub model: String,
+    pub choices: Vec<StreamChoice>,
+}
+
+/// Streaming choice with delta
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StreamChoice {
+    pub index: u32,
+    pub delta: StreamDelta,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finish_reason: Option<String>,
+}
+
+/// Delta content for streaming
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct StreamDelta {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<StreamToolCall>>,
+}
+
+/// Streaming tool call (partial)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StreamToolCall {
+    pub index: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub r#type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub function: Option<StreamFunctionCall>,
+}
+
+/// Streaming function call (partial)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StreamFunctionCall {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<String>,
+}
+
+/// SSE Event types for frontend
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum StreamEvent {
+    /// Content chunk from LLM
+    #[serde(rename = "content")]
+    Content { text: String },
+    /// Reasoning content (DeepSeek R1)
+    #[serde(rename = "reasoning")]
+    Reasoning { text: String },
+    /// Tool call started
+    #[serde(rename = "tool_call")]
+    ToolCall { name: String, arguments: String },
+    /// Tool call result
+    #[serde(rename = "tool_result")]
+    ToolResult { name: String, result: String },
+    /// Stream completed
+    #[serde(rename = "done")]
+    Done,
+    /// Error occurred
+    #[serde(rename = "error")]
+    Error { message: String },
+}
+
 /// Function execution result
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FunctionResult {

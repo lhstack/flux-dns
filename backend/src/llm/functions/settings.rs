@@ -24,17 +24,21 @@ impl LlmFunction for GetSystemStatusFunction {
         let query_count = sqlx::query_as::<_, (i64,)>("SELECT COUNT(*) FROM query_logs")
             .fetch_one(state.db.pool()).await.map(|r| r.0).unwrap_or(0);
         
-        // Get upstream count
-        let upstream_count = sqlx::query_as::<_, (i64, i64)>(
-            "SELECT COUNT(*), SUM(CASE WHEN healthy = 1 THEN 1 ELSE 0 END) FROM upstream_servers"
-        ).fetch_one(state.db.pool()).await.map(|r| (r.0, r.1)).unwrap_or((0, 0));
+        // Get upsream stats from manager
+        let servers = state.db.upstream_servers().list().await.unwrap_or_default();
+        let total_upstreams = servers.len() as i64;
+        
+        let upstream_stats = state.upstream_manager.get_all_stats().await;
+        let healthy_upstreams = servers.iter().filter(|s| {
+            s.enabled && upstream_stats.get(&s.id).map(|st| st.is_healthy()).unwrap_or(true)
+        }).count() as i64;
 
         FunctionResult::success(json!({
             "status": "running",
             "total_queries": query_count,
             "upstreams": {
-                "total": upstream_count.0,
-                "healthy": upstream_count.1
+                "total": total_upstreams,
+                "healthy": healthy_upstreams
             }
         }))
     }
