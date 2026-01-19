@@ -167,8 +167,8 @@
     <el-card class="table-card" shadow="never">
       <div class="table-wrapper">
         <el-table :data="logs" v-loading="loading" stripe class="custom-table">
-          <el-table-column prop="id" label="ID" width="70" class-name="hidden-xs-only" />
-        <el-table-column prop="query_name" label="查询域名" min-width="200">
+          <el-table-column prop="id" label="ID" width="100" show-overflow-tooltip class-name="hidden-xs-only" />
+        <el-table-column prop="query_name" label="查询域名" min-width="200" show-overflow-tooltip>
           <template #default="{ row }">
             <span class="domain-name">{{ row.query_name }}</span>
           </template>
@@ -183,7 +183,7 @@
               <span class="client-ip">{{ row.client_ip }}</span>
             </template>
           </el-table-column>
-        <el-table-column prop="response_code" label="响应码" width="110">
+        <el-table-column prop="response_code" label="响应码" width="110" show-overflow-tooltip>
           <template #default="{ row }">
             <el-tag :type="getResponseCodeType(row.response_code)" size="small" effect="plain">
               {{ row.response_code || '-' }}
@@ -202,7 +202,7 @@
               </el-tag>
             </template>
           </el-table-column>
-          <el-table-column prop="upstream_used" label="上游" min-width="120" class-name="hidden-xs-only">
+          <el-table-column prop="upstream_used" label="上游服务器" min-width="150" class-name="hidden-xs-only" show-overflow-tooltip>
             <template #default="{ row }">
               <span class="upstream-name">{{ row.upstream_used || '-' }}</span>
             </template>
@@ -550,6 +550,10 @@ onMounted(() => {
   font-family: 'Monaco', 'Menlo', monospace;
   font-size: 13px;
   color: #303133;
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .client-ip {
