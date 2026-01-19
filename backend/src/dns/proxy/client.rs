@@ -16,6 +16,47 @@ use tokio::time::timeout;
 use crate::dns::message::{DnsQuery, DnsResponse};
 use super::upstream::{UpstreamServer, UpstreamProtocol};
 
+/// Parse an address string that may contain IPv6 in bracket notation.
+/// Supports formats:
+/// - IPv4: "1.1.1.1:53" or "1.1.1.1"
+/// - IPv6: "[2001:4860:4860::8888]:53" or "[::1]:853"
+/// - Hostname: "dns.google:853" or "dns.google"
+/// Returns (host, port) tuple where host has brackets stripped for IPv6
+fn parse_host_port(address: &str, default_port: u16) -> Result<(String, u16)> {
+    // Check for IPv6 in brackets: [::1]:port or [2001:db8::1]:port
+    if address.starts_with('[') {
+        if let Some(bracket_end) = address.find(']') {
+            let host = address[1..bracket_end].to_string();
+            let rest = &address[bracket_end + 1..];
+            let port = if rest.starts_with(':') {
+                rest[1..].parse::<u16>().unwrap_or(default_port)
+            } else {
+                default_port
+            };
+            return Ok((host, port));
+        }
+    }
+    
+    // Check if it contains a colon - could be host:port or just IPv6 without brackets
+    if address.contains(':') {
+        // Try to parse as IPv6 address (no port)
+        if address.parse::<std::net::Ipv6Addr>().is_ok() {
+            return Ok((address.to_string(), default_port));
+        }
+        
+        // Otherwise treat as host:port (split from last colon)
+        let parts: Vec<&str> = address.rsplitn(2, ':').collect();
+        if parts.len() == 2 {
+            if let Ok(port) = parts[0].parse::<u16>() {
+                return Ok((parts[1].to_string(), port));
+            }
+        }
+    }
+    
+    // No port specified, use default
+    Ok((address.to_string(), default_port))
+}
+
 /// Global QUIC endpoint cache for DoQ clients
 /// Reusing endpoints significantly improves performance by avoiding
 /// repeated socket binding and configuration overhead.
@@ -139,31 +180,34 @@ impl UdpDnsClient {
         }
     }
 
-    /// Parse the server address
+    /// Parse the server address with IPv6 support
+    /// Supports formats: "1.1.1.1:53", "[2001:4860:4860::8888]:53", "dns.google:53"
     fn parse_address(&self) -> Result<SocketAddr> {
-        // Try to parse as socket address directly
-        if let Ok(addr) = self.server.address.parse::<SocketAddr>() {
-            return Ok(addr);
+        let (host, port) = parse_host_port(&self.server.address, UpstreamProtocol::Udp.default_port())?;
+        
+        // Try to parse as IP address directly
+        if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+            return Ok(SocketAddr::new(ip, port));
         }
-
-        // Try to parse as host:port
-        if self.server.address.contains(':') {
-            self.server.address.parse()
-                .map_err(|e| anyhow!("Invalid address format: {}", e))
-        } else {
-            // Assume it's just a host, add default port
-            let addr = format!("{}:{}", self.server.address, UpstreamProtocol::Udp.default_port());
-            addr.parse()
-                .map_err(|e| anyhow!("Invalid address format: {}", e))
-        }
+        
+        // For hostnames, format with brackets for IPv6 compatibility
+        let addr_str = format!("{}:{}", host, port);
+        addr_str.parse()
+            .map_err(|e| anyhow!("Invalid address format '{}': {}", self.server.address, e))
     }
 
     /// Send a query and receive response
     async fn send_query(&self, query_bytes: &[u8], server_addr: SocketAddr) -> Result<Vec<u8>> {
         use tracing::debug;
         
-        // Create a new socket for each query (simpler and avoids state issues)
-        let socket = UdpSocket::bind("0.0.0.0:0").await?;
+        // Bind to appropriate address family based on target
+        let bind_addr = if server_addr.is_ipv6() {
+            "[::]:0"
+        } else {
+            "0.0.0.0:0"
+        };
+        let socket = UdpSocket::bind(bind_addr).await
+            .map_err(|e| anyhow!("Failed to bind UDP socket to {}: {}", bind_addr, e))?;
         
         debug!("Sending UDP query to {} ({} bytes)", server_addr, query_bytes.len());
         
@@ -253,26 +297,24 @@ impl DotDnsClient {
         Self { server }
     }
 
-    /// Parse the server address
+    /// Parse the server address with IPv6 support
+    /// Supports formats: "dns.google:853", "[2001:4860:4860::8888]:853", "1.1.1.1:853"
     fn parse_address(&self) -> Result<(String, u16)> {
-        if self.server.address.contains(':') {
-            let parts: Vec<&str> = self.server.address.rsplitn(2, ':').collect();
-            if parts.len() == 2 {
-                let port: u16 = parts[0].parse()
-                    .map_err(|_| anyhow!("Invalid port"))?;
-                return Ok((parts[1].to_string(), port));
-            }
-        }
-        Ok((self.server.address.clone(), UpstreamProtocol::Dot.default_port()))
+        parse_host_port(&self.server.address, UpstreamProtocol::Dot.default_port())
     }
 
-    /// Create a new TLS connection
+    /// Create a new TLS connection with IPv6 support
     async fn create_connection(&self, host: &str, port: u16) -> Result<DotConnection> {
         use tokio_rustls::TlsConnector;
         use rustls::{ClientConfig, RootCertStore};
         use rustls::pki_types::ServerName;
 
-        let addr = format!("{}:{}", host, port);
+        // Format address for connection - use brackets for IPv6
+        let addr = if host.contains(':') {
+            format!("[{}]:{}", host, port)
+        } else {
+            format!("{}:{}", host, port)
+        };
         
         // Create TLS config with system root certificates
         let mut root_store = RootCertStore::empty();
@@ -283,12 +325,15 @@ impl DotDnsClient {
             .with_no_client_auth();
         
         let connector = TlsConnector::from(Arc::new(config));
+        
+        // For SNI, use the host directly (without brackets) if it's a hostname
+        // For IP addresses, we still need a ServerName but TLS doesn't verify it
         let server_name = ServerName::try_from(host.to_string())
-            .map_err(|_| anyhow!("Invalid server name"))?;
+            .map_err(|_| anyhow!("Invalid server name: {}", host))?;
         
         // Connect with timeout
         let stream = timeout(self.server.timeout, TcpStream::connect(&addr)).await
-            .map_err(|_| anyhow!("Connection timeout"))??;
+            .map_err(|_| anyhow!("Connection timeout to {}", addr))??;
         
         let tls_stream = timeout(self.server.timeout, connector.connect(server_name, stream)).await
             .map_err(|_| anyhow!("TLS handshake timeout"))??;
@@ -774,53 +819,85 @@ impl Doh3DnsClient {
         Self { server }
     }
 
-    /// Get the DoH3 URL and parse host/port
+    /// Get the DoH3 URL and parse host/port with IPv6 support
+    /// Returns (sni_host, host, port, path)
+    /// Supports formats:
+    /// - https://dns.google/dns-query
+    /// - https://[2001:4860:4860::8888]/dns-query
+    /// - [2001:4860:4860::8888]:443
+    /// - dns.google:443
     fn parse_url(&self) -> Result<(String, String, u16, String)> {
         let addr = &self.server.address;
         
         // Parse URL format: https://host:port/path or host:port or host
         if addr.starts_with("https://") {
             let without_scheme = &addr[8..];
+            
+            // Find path (starts with /)
             let (host_port, path) = if let Some(slash_pos) = without_scheme.find('/') {
                 (&without_scheme[..slash_pos], &without_scheme[slash_pos..])
             } else {
                 (without_scheme, "/dns-query")
             };
             
-            let (host, port) = if host_port.contains(':') {
+            // Parse host:port with IPv6 support
+            let (host, port) = if host_port.starts_with('[') {
+                // IPv6 in brackets: [::1]:443 or [::1]
+                if let Some(bracket_end) = host_port.find(']') {
+                    let ipv6_host = host_port[1..bracket_end].to_string();
+                    let rest = &host_port[bracket_end + 1..];
+                    let port = if rest.starts_with(':') {
+                        rest[1..].parse::<u16>().unwrap_or(443)
+                    } else {
+                        443
+                    };
+                    (ipv6_host, port)
+                } else {
+                    (host_port.to_string(), 443)
+                }
+            } else if host_port.contains(':') {
+                // Could be host:port or bare IPv6 (unlikely in URL without brackets)
                 let parts: Vec<&str> = host_port.rsplitn(2, ':').collect();
-                let port: u16 = parts[0].parse().unwrap_or(443);
-                (parts[1].to_string(), port)
+                if parts.len() == 2 {
+                    if let Ok(port) = parts[0].parse::<u16>() {
+                        (parts[1].to_string(), port)
+                    } else {
+                        (host_port.to_string(), 443)
+                    }
+                } else {
+                    (host_port.to_string(), 443)
+                }
             } else {
                 (host_port.to_string(), 443)
             };
             
             Ok((host.clone(), host, port, path.to_string()))
-        } else if addr.contains(':') {
-            let parts: Vec<&str> = addr.rsplitn(2, ':').collect();
-            let port: u16 = parts[0].parse().unwrap_or(443);
-            let host = parts[1].to_string();
-            Ok((host.clone(), host, port, "/dns-query".to_string()))
         } else {
-            Ok((addr.clone(), addr.clone(), 443, "/dns-query".to_string()))
+            // Non-URL format: use parse_host_port helper
+            let (host, port) = parse_host_port(addr, 443)?;
+            Ok((host.clone(), host, port, "/dns-query".to_string()))
         }
     }
 
-    /// Resolve hostname to socket address
+    /// Resolve hostname to socket address with proper IPv6 formatting
     async fn resolve_address(&self, host: &str, port: u16) -> Result<std::net::SocketAddr> {
         // Try to parse as IP address first
         if let Ok(ip) = host.parse::<std::net::IpAddr>() {
             return Ok(std::net::SocketAddr::new(ip, port));
         }
 
-        // Resolve hostname
+        // Resolve hostname - format with brackets for IPv6 compatibility in lookup
         use tokio::net::lookup_host;
-        let addr_str = format!("{}:{}", host, port);
+        let addr_str = if host.contains(':') {
+            format!("[{}]:{}", host, port)
+        } else {
+            format!("{}:{}", host, port)
+        };
         let addrs: Vec<std::net::SocketAddr> = lookup_host(&addr_str).await
             .map_err(|e| anyhow!("Failed to resolve hostname {}: {}", host, e))?
             .collect();
         
-        // Prefer IPv4
+        // Prefer IPv4 for better compatibility, but accept IPv6
         addrs.iter()
             .find(|a| a.is_ipv4())
             .or_else(|| addrs.first())
