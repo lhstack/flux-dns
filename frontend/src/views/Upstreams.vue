@@ -64,13 +64,13 @@
     <el-card class="table-card" shadow="never">
       <div class="table-wrapper">
         <el-table :data="servers" v-loading="loading" stripe class="custom-table">
-          <el-table-column prop="id" label="ID" width="60" class-name="hidden-xs-only" />
-          <el-table-column prop="name" label="名称" min-width="120">
+          <el-table-column prop="id" label="ID" width="80" class-name="hidden-xs-only" />
+          <el-table-column prop="name" label="名称" min-width="120" show-overflow-tooltip>
             <template #default="{ row }">
               <span class="server-name">{{ row.name }}</span>
             </template>
           </el-table-column>
-          <el-table-column prop="address" label="地址" min-width="220">
+          <el-table-column prop="address" label="地址" min-width="220" show-overflow-tooltip>
             <template #default="{ row }">
               <span class="server-address">{{ row.address }}</span>
             </template>
@@ -653,12 +653,20 @@ onUnmounted(() => {
 .server-name {
   font-weight: 500;
   color: #303133;
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .server-address {
   font-family: 'Monaco', 'Menlo', monospace;
   font-size: 13px;
   color: #606266;
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .timeout-value {
