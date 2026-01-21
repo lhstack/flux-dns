@@ -1069,7 +1069,7 @@ impl DnsClient for Doh3DnsClient {
                 .uri(&uri)
                 .header("content-type", "application/dns-message")
                 .header("accept", "application/dns-message")
-                .header("user-agent", "fluxdns/1.0")
+                .header("user-agent", "fluxdns/1.1.6")
                 .header("content-length", query_bytes.len().to_string())
                 .body(())
                 .map_err(|e| anyhow!("Failed to build request: {}", e))?;

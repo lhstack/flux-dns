@@ -354,7 +354,13 @@ All management APIs require JWT authentication with `/api/` prefix:
 
 ## 📝 Changelog
 
-### v1.1.5 (Latest)
+### v1.1.6 (Latest)
+- 🚀 **Connection Stability** - Implemented Endpoint Pool (10 sockets) for UDP and Connection Pool (10 conns) for DoQ/DoH3, significantly improving stability under high concurrency
+- ✨ **DoQ Optimization** - Enabled QUIC Keep-Alive (5s) and idle timeout to resolve connection loss issues
+- 🐛 **DoH3 Fixes** - Fixed 500 errors caused by missing headers and implemented connection reuse
+- 📊 **Enhanced Monitoring** - Added global failure counter and tuned upstream statistics algorithm
+
+### v1.1.5
 - ✨ **Dashboard Redesign** - Totally redesigned homepage with clearer feature showcase
 - 🐛 **Listener Fixes** - Fixed an issue where listeners might fail to start when toggled on
 - 🐛 **Certificate Management** - Fixed issues with TLS certificate clearing and incorrect status display
