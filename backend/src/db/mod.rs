@@ -79,6 +79,13 @@ impl Database {
         ServerListenerRepository::new(self.pool.clone())
     }
 
+    /// Force WAL checkpoint to ensure all writes are visible to readers
+    pub async fn checkpoint(&self) -> Result<()> {
+        sqlx::query("PRAGMA wal_checkpoint(PASSIVE)")
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
 
     /// Run database migrations
     async fn run_migrations(&self) -> Result<()> {

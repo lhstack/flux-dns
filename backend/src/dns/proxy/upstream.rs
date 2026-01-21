@@ -434,6 +434,7 @@ impl UpstreamManager {
 
     /// Reload servers from a provided database reference
     pub async fn reload_from_db(&self, db: &Database) -> anyhow::Result<()> {
+        db.checkpoint().await?;
         let db_servers = db.upstream_servers().list_enabled().await?;
         let servers: Vec<UpstreamServer> = db_servers
             .iter()
