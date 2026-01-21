@@ -21,6 +21,9 @@ use super::upstream::{UpstreamManager, UpstreamServer};
 use std::collections::HashMap;
 use tokio::sync::Mutex;
 
+/// Global counter for query failures
+static TOTAL_FAILURE_COUNT: AtomicUsize = AtomicUsize::new(0);
+
 /// Query strategy types
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -211,7 +214,10 @@ impl ProxyManager {
                                 "[{}] [Concurrent] {} responded: {} in {}ms", 
                                 tid, server_name, r.response.response_code, r.response_time_ms
                             ),
-                            Err(e) => warn!("[{}] [Concurrent] {} failed: {}", tid, server_name, e),
+                            Err(e) => {
+                                let fail_count = TOTAL_FAILURE_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+                                warn!("[{}] [Concurrent] {} failed: {}, 当前失败总数: {}", tid, server_name, e, fail_count);
+                            },
                         }
                         Some((server_id, result))
                     }
@@ -255,12 +261,13 @@ impl ProxyManager {
                             .await;
                         return Ok(query_result);
                     } else {
-                        warn!(
-                            "[{}] [Concurrent] {} returned error: {}",
-                            trace_id, query_result.server_name, response_code
-                        );
                         self.upstream_manager.record_failure(query_result.server_id).await;
+                        let fail_count = TOTAL_FAILURE_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
                         last_error = Some(format!("{} returned {}", query_result.server_name, response_code));
+                        warn!(
+                            "[{}] [Concurrent] {} returned error: {}, 当前失败总数: {}",
+                            trace_id, query_result.server_name, response_code, fail_count
+                        );
                     }
                 }
                 Ok(Some((server_id, Err(e)))) => {
@@ -391,7 +398,8 @@ impl ProxyManager {
                 Ok(result)
             }
             Err(e) => {
-                warn!("[{}] Server {} failed: {}, trying failover", trace_id, server.name, e);
+                let fail_count = TOTAL_FAILURE_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+                warn!("[{}] Server {} failed: {}, trying failover, 当前失败总数: {}", trace_id, server.name, e, fail_count);
                 self.upstream_manager.record_failure(server.id).await;
                 
                 // Try failover to another server
@@ -431,7 +439,8 @@ impl ProxyManager {
                     return Ok(result);
                 }
                 Err(e) => {
-                    warn!("[{}] [Failover] Server {} failed: {}", trace_id, server.name, e);
+                    let fail_count = TOTAL_FAILURE_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+                    warn!("[{}] [Failover] Server {} failed: {}, 当前失败总数: {}", trace_id, server.name, e, fail_count);
                     self.upstream_manager.record_failure(server.id).await;
                 }
             }

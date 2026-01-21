@@ -12,6 +12,12 @@ use async_trait::async_trait;
 use tokio::net::UdpSocket;
 use tokio::sync::OnceCell;
 use tokio::time::timeout;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use h3::client::SendRequest;
+use h3_quinn::OpenStreams;
+use bytes::Bytes;
+
+type H3SendRequest = SendRequest<OpenStreams, Bytes>;
 
 use crate::dns::message::{DnsQuery, DnsResponse};
 use super::upstream::{UpstreamServer, UpstreamProtocol};
@@ -60,12 +66,22 @@ fn parse_host_port(address: &str, default_port: u16) -> Result<(String, u16)> {
 /// Global QUIC endpoint cache for DoQ clients
 /// Reusing endpoints significantly improves performance by avoiding
 /// repeated socket binding and configuration overhead.
-static DOQ_ENDPOINT_V4: OnceCell<quinn::Endpoint> = OnceCell::const_new();
-static DOQ_ENDPOINT_V6: OnceCell<quinn::Endpoint> = OnceCell::const_new();
+///
+/// We use a pool of endpoints to distribute load and avoid contention.
+const ENDPOINT_POOL_SIZE: usize = 20;
+
+static DOQ_ENDPOINTS_V4: OnceCell<Vec<quinn::Endpoint>> = OnceCell::const_new();
+static DOQ_INDEX_V4: AtomicUsize = AtomicUsize::new(0);
+
+static DOQ_ENDPOINTS_V6: OnceCell<Vec<quinn::Endpoint>> = OnceCell::const_new();
+static DOQ_INDEX_V6: AtomicUsize = AtomicUsize::new(0);
 
 /// Global QUIC endpoint cache for DoH3 clients
-static DOH3_ENDPOINT_V4: OnceCell<quinn::Endpoint> = OnceCell::const_new();
-static DOH3_ENDPOINT_V6: OnceCell<quinn::Endpoint> = OnceCell::const_new();
+static DOH3_ENDPOINTS_V4: OnceCell<Vec<quinn::Endpoint>> = OnceCell::const_new();
+static DOH3_INDEX_V4: AtomicUsize = AtomicUsize::new(0);
+
+static DOH3_ENDPOINTS_V6: OnceCell<Vec<quinn::Endpoint>> = OnceCell::const_new();
+static DOH3_INDEX_V6: AtomicUsize = AtomicUsize::new(0);
 
 /// Global DoT connection pool
 /// Key: "host:port", Value: TLS stream
@@ -91,47 +107,70 @@ enum QuicProtocol {
 
 /// Get or create a cached QUIC endpoint for the given protocol and address family
 fn get_quic_endpoint(protocol: QuicProtocol, is_ipv6: bool) -> Result<&'static quinn::Endpoint> {
-    let cell = match (protocol, is_ipv6) {
-        (QuicProtocol::Doq, false) => &DOQ_ENDPOINT_V4,
-        (QuicProtocol::Doq, true) => &DOQ_ENDPOINT_V6,
-        (QuicProtocol::Doh3, false) => &DOH3_ENDPOINT_V4,
-        (QuicProtocol::Doh3, true) => &DOH3_ENDPOINT_V6,
+    let (cell, index) = match (protocol, is_ipv6) {
+        (QuicProtocol::Doq, false) => (&DOQ_ENDPOINTS_V4, &DOQ_INDEX_V4),
+        (QuicProtocol::Doq, true) => (&DOQ_ENDPOINTS_V6, &DOQ_INDEX_V6),
+        (QuicProtocol::Doh3, false) => (&DOH3_ENDPOINTS_V4, &DOH3_INDEX_V4),
+        (QuicProtocol::Doh3, true) => (&DOH3_ENDPOINTS_V6, &DOH3_INDEX_V6),
     };
     
-    // Try to get existing endpoint
-    if let Some(endpoint) = cell.get() {
-        return Ok(endpoint);
+    // Try to get existing endpoint pool
+    if let Some(endpoints) = cell.get() {
+        let idx = index.fetch_add(1, Ordering::Relaxed) % endpoints.len();
+        return Ok(&endpoints[idx]);
     }
     
-    // Create new endpoint with appropriate config
-    let bind_addr: SocketAddr = if is_ipv6 {
-        "[::]:0".parse()?
-    } else {
-        "0.0.0.0:0".parse()?
-    };
+    // Create new endpoint pool
+    let mut eps = Vec::with_capacity(ENDPOINT_POOL_SIZE);
     
-    // Create TLS config with certificate verification disabled (for IP-based connections)
-    let mut crypto = rustls::ClientConfig::builder()
-        .dangerous()
-        .with_custom_certificate_verifier(Arc::new(NoVerifier))
-        .with_no_client_auth();
+    for _ in 0..ENDPOINT_POOL_SIZE {
+        // Create new endpoint with appropriate config
+        let bind_addr: SocketAddr = if is_ipv6 {
+            "[::]:0".parse()?
+        } else {
+            "0.0.0.0:0".parse()?
+        };
+        
+        // Create TLS config with certificate verification disabled (for IP-based connections)
+        let mut crypto = rustls::ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(NoVerifier))
+            .with_no_client_auth();
+        
+        // Set ALPN protocol based on QUIC protocol type
+        crypto.alpn_protocols = match protocol {
+            QuicProtocol::Doq => vec![b"doq".to_vec()],
+            QuicProtocol::Doh3 => vec![b"h3".to_vec()],
+        };
+        
+        let quic_crypto = quinn::crypto::rustls::QuicClientConfig::try_from(crypto)
+            .map_err(|e| anyhow!("Failed to create QUIC client config: {}", e))?;
+            
+        // Configure Transport (Keep-Alive)
+        let mut transport = quinn::TransportConfig::default();
+        // Send keep-alive every 5 seconds to maintain NAT mappings
+        transport.keep_alive_interval(Some(Duration::from_secs(5)));
+        // Set max idle timeout to 20 seconds
+        transport.max_idle_timeout(Some(quinn::VarInt::from_u32(20_000).into()));
+        
+        let mut client_config = quinn::ClientConfig::new(Arc::new(quic_crypto));
+        client_config.transport_config(Arc::new(transport));
+        
+        let mut endpoint = quinn::Endpoint::client(bind_addr)?;
+        endpoint.set_default_client_config(client_config);
+        
+        eps.push(endpoint);
+    }
     
-    // Set ALPN protocol based on QUIC protocol type
-    crypto.alpn_protocols = match protocol {
-        QuicProtocol::Doq => vec![b"doq".to_vec()],
-        QuicProtocol::Doh3 => vec![b"h3".to_vec()],
-    };
+    // Try to store it
+    // If another thread beat us to it, the result will be Err(value), but we just discard our created value
+    // and use the one in the cell.
+    let _ = cell.set(eps);
     
-    let quic_crypto = quinn::crypto::rustls::QuicClientConfig::try_from(crypto)
-        .map_err(|e| anyhow!("Failed to create QUIC client config: {}", e))?;
-    let client_config = quinn::ClientConfig::new(Arc::new(quic_crypto));
-    
-    let mut endpoint = quinn::Endpoint::client(bind_addr)?;
-    endpoint.set_default_client_config(client_config);
-    
-    // Try to store it, but if another task beat us, use theirs
-    let _ = cell.set(endpoint);
-    Ok(cell.get().unwrap())
+    // Get from cell (guaranteed to be Some now)
+    let endpoints = cell.get().unwrap();
+    let idx = index.fetch_add(1, Ordering::Relaxed) % endpoints.len();
+    Ok(&endpoints[idx])
 }
 
 /// Result of a DNS query to an upstream server
@@ -530,17 +569,27 @@ impl DnsClient for DohDnsClient {
 /// Queries upstream DNS servers using DNS over QUIC protocol.
 pub struct DoqDnsClient {
     server: UpstreamServer,
-    connection: Arc<tokio::sync::RwLock<Option<quinn::Connection>>>,
-    connect_lock: Arc<tokio::sync::Mutex<()>>,
+    connections: Vec<Arc<tokio::sync::RwLock<Option<quinn::Connection>>>>,
+    connect_locks: Vec<Arc<tokio::sync::Mutex<()>>>,
+    index: AtomicUsize,
 }
 
 impl DoqDnsClient {
     /// Create a new DoQ DNS client
     pub fn new(server: UpstreamServer) -> Self {
+        let mut connections = Vec::with_capacity(ENDPOINT_POOL_SIZE);
+        let mut connect_locks = Vec::with_capacity(ENDPOINT_POOL_SIZE);
+        
+        for _ in 0..ENDPOINT_POOL_SIZE {
+            connections.push(Arc::new(tokio::sync::RwLock::new(None)));
+            connect_locks.push(Arc::new(tokio::sync::Mutex::new(())));
+        }
+
         Self { 
             server,
-            connection: Arc::new(tokio::sync::RwLock::new(None)),
-            connect_lock: Arc::new(tokio::sync::Mutex::new(())),
+            connections,
+            connect_locks,
+            index: AtomicUsize::new(0),
         }
     }
 
@@ -622,6 +671,11 @@ impl DnsClient for DoqDnsClient {
         // Loop to allow one retry if cached connection fails
         let mut attempts = 0;
         
+        // Select a connection slot using round-robin
+        let idx = self.index.fetch_add(1, Ordering::Relaxed) % ENDPOINT_POOL_SIZE;
+        let connection_slot = &self.connections[idx];
+        let connect_lock = &self.connect_locks[idx];
+        
         loop {
             attempts += 1;
             let is_retry = attempts > 1;
@@ -635,27 +689,27 @@ impl DnsClient for DoqDnsClient {
                 debug!("DoQ retry: forcing new connection to {}", addr);
                 None
             } else {
-                let guard = self.connection.read().await;
+                let guard = connection_slot.read().await;
                 guard.clone().filter(|c| is_healthy(c))
             };
             
             let connection = if let Some(conn) = connection {
-                debug!("DoQ reusing existing connection to {}", addr);
+                debug!("DoQ reusing existing connection to {} (slot {})", addr, idx);
                 conn
             } else {
                 // 2. Slow path: Acquire lock to serialize connection attempts
-                let _lock = self.connect_lock.lock().await;
+                let _lock = connect_lock.lock().await;
 
                 // 3. Double check
-                let guard = self.connection.read().await;
+                let guard = connection_slot.read().await;
                 if let Some(conn) = guard.clone().filter(|c| is_healthy(c)) {
                     drop(guard);
-                    debug!("DoQ reused connection created by another thread to {}", addr);
+                    debug!("DoQ reused connection created by another thread to {} (slot {})", addr, idx);
                     conn
                 } else {
                     drop(guard);
                     
-                    debug!("DoQ creating new connection to {} (SNI: {})", addr, sni_host);
+                    debug!("DoQ creating new connection to {} (SNI: {}, slot {})", addr, sni_host, idx);
                     
                     // Get or create cached endpoint
                     let endpoint = get_quic_endpoint(QuicProtocol::Doq, addr.is_ipv6())?;
@@ -663,9 +717,9 @@ impl DnsClient for DoqDnsClient {
                     
                     match timeout(self.server.timeout, endpoint.connect(addr, connect_sni)?).await {
                         Ok(Ok(conn)) => {
-                            debug!("DoQ connection established to {}", addr);
+                            debug!("DoQ connection established to {} (slot {})", addr, idx);
                             // Update cache
-                            let mut guard = self.connection.write().await;
+                            let mut guard = connection_slot.write().await;
                             *guard = Some(conn.clone());
                             conn
                         },
@@ -731,7 +785,7 @@ impl DnsClient for DoqDnsClient {
                          debug!("DoQ query failed on cached connection: {}, retrying...", e);
                          
                          // Clear cache to ensure next loop gets a fresh one
-                         let mut guard = self.connection.write().await;
+                         let mut guard = connection_slot.write().await;
                          *guard = None;
                          continue;
                     }
@@ -811,12 +865,28 @@ impl rustls::client::danger::ServerCertVerifier for NoVerifier {
 /// The QUIC endpoint is reused for better performance.
 pub struct Doh3DnsClient {
     server: UpstreamServer,
+    connections: Vec<Arc<tokio::sync::RwLock<Option<H3SendRequest>>>>,
+    connect_locks: Vec<Arc<tokio::sync::Mutex<()>>>,
+    index: AtomicUsize,
 }
 
 impl Doh3DnsClient {
     /// Create a new DoH3 DNS client
     pub fn new(server: UpstreamServer) -> Self {
-        Self { server }
+        let mut connections = Vec::with_capacity(ENDPOINT_POOL_SIZE);
+        let mut connect_locks = Vec::with_capacity(ENDPOINT_POOL_SIZE);
+        
+        for _ in 0..ENDPOINT_POOL_SIZE {
+            connections.push(Arc::new(tokio::sync::RwLock::new(None)));
+            connect_locks.push(Arc::new(tokio::sync::Mutex::new(())));
+        }
+
+        Self {
+            server,
+            connections,
+            connect_locks,
+            index: AtomicUsize::new(0),
+        }
     }
 
     /// Get the DoH3 URL and parse host/port with IPv6 support
@@ -918,60 +988,119 @@ impl DnsClient for Doh3DnsClient {
         
         debug!("DoH3 connecting to {} (SNI: {}, path: {})", addr, sni_host, path);
 
-        // Get or create cached endpoint (endpoint is reused, connection is not)
-        let endpoint = get_quic_endpoint(QuicProtocol::Doh3, addr.is_ipv6())?;
-        let connect_sni = sni_host.as_str();
+        debug!("DoH3 connecting to {} (SNI: {}, path: {})", addr, sni_host, path);
 
+        let idx = self.index.fetch_add(1, Ordering::Relaxed) % ENDPOINT_POOL_SIZE;
+        let connection_slot = &self.connections[idx];
+        let connect_lock = &self.connect_locks[idx];
+
+        // START TIMER
         let start = std::time::Instant::now();
 
-        // Create new QUIC connection for each query
-        let connection = timeout(
-            self.server.timeout,
-            endpoint.connect(addr, connect_sni)?
-        ).await
-            .map_err(|_| anyhow!("Connection timeout"))??;
-
-        debug!("DoH3 QUIC connection established");
-
-        // Create HTTP/3 session
-        let quinn_conn = h3_quinn::Connection::new(connection);
-        let (mut driver, mut send_request) = h3::client::new(quinn_conn).await
-            .map_err(|e| anyhow!("Failed to create H3 connection: {}", e))?;
-
-        // Spawn driver task
-        tokio::spawn(async move {
-            let _ = futures::future::poll_fn(|cx| driver.poll_close(cx)).await;
-        });
-
-        // Encode DNS query
+        // ENCODE QUERY
         let query_bytes = query.to_bytes()
             .map_err(|e| anyhow!("Failed to encode query: {}", e))?;
+        
+        let mut attempts = 0;
+        
+        // Loop to get a request stream
+        let mut request_stream = loop {
+            attempts += 1;
+            let is_retry = attempts > 1;
 
-        // Build HTTP/3 request
-        let uri = format!("https://{}:{}{}", sni_host, port, path);
-        let request = Request::builder()
-            .method(Method::POST)
-            .uri(&uri)
-            .header("content-type", "application/dns-message")
-            .header("accept", "application/dns-message")
-            .body(())
-            .map_err(|e| anyhow!("Failed to build request: {}", e))?;
+            // 1. Get connection (cached)
+            let mut sender = if is_retry {
+                None
+            } else {
+                let guard = connection_slot.read().await;
+                guard.clone()
+            };
 
-        debug!("DoH3 sending request to {}", uri);
+            // 2. If no cached connection, create new one
+            if sender.is_none() {
+                let _lock = connect_lock.lock().await;
+                
+                // Double check
+                let guard = connection_slot.read().await;
+                if let Some(s) = guard.clone() {
+                    sender = Some(s);
+                } else {
+                    drop(guard);
+                    
+                    // Get or create cached endpoint
+                    let endpoint = get_quic_endpoint(QuicProtocol::Doh3, addr.is_ipv6())?;
+                    let connect_sni = sni_host.as_str();
 
-        // Send request
-        let mut stream = send_request.send_request(request).await
-            .map_err(|e| anyhow!("Failed to send request: {}", e))?;
+                    debug!("DoH3 creating new connection to {} (slot {})", addr, idx);
+
+                    // Create new QUIC connection
+                    let connection = timeout(
+                        self.server.timeout,
+                        endpoint.connect(addr, connect_sni)?
+                    ).await
+                        .map_err(|_| anyhow!("Connection timeout"))??;
+
+                    debug!("DoH3 QUIC connection established (slot {})", idx);
+
+                    // Create HTTP/3 session
+                    let quinn_conn = h3_quinn::Connection::new(connection);
+                    let (mut driver, new_sender) = h3::client::new(quinn_conn).await
+                        .map_err(|e| anyhow!("Failed to create H3 connection: {}", e))?;
+
+                    // Spawn driver task
+                    tokio::spawn(async move {
+                        let _ = futures::future::poll_fn(|cx| driver.poll_close(cx)).await;
+                    });
+                    
+                    // Update cache
+                    let mut guard = connection_slot.write().await;
+                    *guard = Some(new_sender.clone());
+                    sender = Some(new_sender);
+                }
+            }
+
+            // At this point we have a sender
+            let mut sender = sender.unwrap();
+            
+            // Build HTTP/3 request
+            let uri = format!("https://{}:{}{}", sni_host, port, path);
+            let request = Request::builder()
+                .method(Method::POST)
+                .uri(&uri)
+                .header("content-type", "application/dns-message")
+                .header("accept", "application/dns-message")
+                .header("user-agent", "fluxdns/1.0")
+                .header("content-length", query_bytes.len().to_string())
+                .body(())
+                .map_err(|e| anyhow!("Failed to build request: {}", e))?;
+
+            debug!("DoH3 sending request to {} (slot {})", uri, idx);
+
+            // Send request
+            match sender.send_request(request).await {
+                Ok(stream) => break stream,
+                Err(e) => {
+                    // If cached connection failed, clear it and retry
+                    if !is_retry {
+                        debug!("DoH3 cached connection failed: {}, retrying...", e);
+                        let mut guard = connection_slot.write().await;
+                        *guard = None;
+                        continue;
+                    }
+                    return Err(anyhow!("Failed to send request: {}", e));
+                }
+            }
+        };
 
         // Send body
-        stream.send_data(Bytes::from(query_bytes)).await
+        request_stream.send_data(Bytes::from(query_bytes)).await
             .map_err(|e| anyhow!("Failed to send body: {}", e))?;
-
-        stream.finish().await
+            
+        request_stream.finish().await
             .map_err(|e| anyhow!("Failed to finish request: {}", e))?;
 
         // Receive response
-        let response = stream.recv_response().await
+        let response = request_stream.recv_response().await
             .map_err(|e| anyhow!("Failed to receive response: {}", e))?;
 
         debug!("DoH3 response status: {}", response.status());
@@ -982,10 +1111,11 @@ impl DnsClient for Doh3DnsClient {
 
         // Read response body
         let mut response_bytes = Vec::new();
-        while let Some(mut chunk) = stream.recv_data().await
+        while let Some(mut chunk) = request_stream.recv_data().await
             .map_err(|e| anyhow!("Failed to read response body: {}", e))? 
         {
             while chunk.has_remaining() {
+                use bytes::Buf; // Import Buf trait
                 let bytes = chunk.chunk();
                 response_bytes.extend_from_slice(bytes);
                 chunk.advance(bytes.len());

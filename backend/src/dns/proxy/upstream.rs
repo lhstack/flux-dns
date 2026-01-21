@@ -180,7 +180,7 @@ impl Default for UpstreamStats {
 impl UpstreamStats {
     /// EMA smoothing factor (0.3 = recent values have ~30% weight)
     /// Higher value = more responsive to recent changes
-    const EMA_ALPHA: f64 = 0.3;
+    const EMA_ALPHA: f64 = 0.5;
     /// Maximum recent samples to keep
     const MAX_RECENT_SAMPLES: usize = 10;
 
